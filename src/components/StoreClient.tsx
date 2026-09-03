@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { useRouter } from 'next/navigation'; // <-- AÑADE ESTA LÍNEA
+import { useRouter } from 'next/navigation';
 
 // Función para mandar mensajes a Telegram (Colocada fuera para que no se repita)
 const avisarPorTelegram = async (mensaje: string) => {
@@ -59,84 +59,81 @@ export default function StoreClient({ products }: { products: Product[] }) {
   const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
   const handleCheckout = async () => {
-if (!buyerName.trim()) {
-  alert('Por favor, introduce tu nombre para el pedido.');
-  return;
-}
-
-setStatus('loading');
-
-// 1. Crear la cabecera del pedido
-const { data: orderData, error: orderError } = await supabase
-  .from('orders')
-  .insert([{ buyer_name: buyerName, scout_unit: scoutUnit, total_amount: total }])
-  .select('id')
-  .single();
-
-if (orderError || !orderData) {
-  alert('Hubo un error al crear el pedido: ' + orderError?.message);
-  setStatus('idle');
-  return;
-}
-
-// 2. Crear las líneas de los productos
-const itemsToInsert = cart.map(item => ({
-  order_id: orderData.id,
-  variant_id: item.variant_id,
-  quantity: item.quantity,
-  unit_price: item.price
-}));
-
-const { error: itemsError } = await supabase.from('order_items').insert(itemsToInsert);
-
-if (itemsError) {
-  alert('Hubo un error al guardar los productos: ' + itemsError.message);
-  setStatus('idle');
-  return;
-}
-
-// 3. Descontar el stock de Supabase (VERSIÓN MEJORADA)
-for (const item of cart) {
-  // Pedimos solo el stock (el nombre ya lo sabemos porque está en el carrito)
-  const { data: variantInfo, error: selectError } = await supabase
-    .from('product_variants')
-    .select('stock, size')
-    .eq('id', item.variant_id)
-    .single();
-
-  if (selectError) {
-    alert("¡Aviso! No se pudo leer el stock actual: " + selectError.message);
-  }
-
-  if (variantInfo) {
-    const stockRestante = variantInfo.stock - item.quantity;
-
-    // Actualizamos la base de datos
-    const { error: updateError } = await supabase
-      .from('product_variants')
-      .update({ stock: stockRestante })
-      .eq('id', item.variant_id);
-
-    if (updateError) {
-      alert("¡Aviso! No se pudo restar el stock: " + updateError.message);
+    if (!buyerName.trim()) {
+      alert('Por favor, introduce tu nombre para el pedido.');
+      return;
     }
 
-    // Alarma de Telegram si baja de 5
-    if (stockRestante < 5) {
-      const mensajeAlarma = `🚨 ¡Alerta de Almacén Scout!\n\nEl artículo "${item.product_name}" (Talla: ${variantInfo.size}) se está agotando.\n⚠️ Solo quedan: ${stockRestante} unidades.`;
-      await avisarPorTelegram(mensajeAlarma);
+    setStatus('loading');
+
+    // 1. Crear la cabecera del pedido
+    const { data: orderData, error: orderError } = await supabase
+      .from('orders')
+      .insert([{ buyer_name: buyerName, scout_unit: scoutUnit, total_amount: total }])
+      .select('id')
+      .single();
+
+    if (orderError || !orderData) {
+      alert('Hubo un error al crear el pedido: ' + orderError?.message);
+      setStatus('idle');
+      return;
     }
-  }
-}
 
-// Aviso general del nuevo pedido
-await avisarPorTelegram(`✅ Nuevo pedido de ${buyerName} (${scoutUnit}): ${total} €`);
+    // 2. Crear las líneas de los productos
+    const itemsToInsert = cart.map(item => ({
+      order_id: orderData.id,
+      variant_id: item.variant_id,
+      quantity: item.quantity,
+      unit_price: item.price
+    }));
 
-// 4. ¡Éxito!
-setStatus('success');
-setCart([]);
-router.refresh();
-};
+    const { error: itemsError } = await supabase.from('order_items').insert(itemsToInsert);
+
+    if (itemsError) {
+      alert('Hubo un error al guardar los productos: ' + itemsError.message);
+      setStatus('idle');
+      return;
+    }
+
+    // 3. Descontar el stock de Supabase (VERSIÓN MEJORADA)
+    for (const item of cart) {
+      const { data: variantInfo, error: selectError } = await supabase
+        .from('product_variants')
+        .select('stock, size')
+        .eq('id', item.variant_id)
+        .single();
+
+      if (selectError) {
+        alert("¡Aviso! No se pudo leer el stock actual: " + selectError.message);
+      }
+
+      if (variantInfo) {
+        const stockRestante = variantInfo.stock - item.quantity;
+
+        const { error: updateError } = await supabase
+          .from('product_variants')
+          .update({ stock: stockRestante })
+          .eq('id', item.variant_id);
+
+        if (updateError) {
+          alert("¡Aviso! No se pudo restar el stock: " + updateError.message);
+        }
+
+        if (stockRestante < 5) {
+          const mensajeAlarma = `🚨 ¡Alerta de Almacén Scout!\n\nEl artículo "${item.product_name}" (Talla: ${variantInfo.size}) se está agotando.\n⚠️ Solo quedan: ${stockRestante} unidades.`;
+          await avisarPorTelegram(mensajeAlarma);
+        }
+      }
+    }
+
+    // Aviso general del nuevo pedido
+    await avisarPorTelegram(`✅ Nuevo pedido de ${buyerName} (${scoutUnit}): ${total} €`);
+
+    // 4. ¡Éxito!
+    setStatus('success');
+    setCart([]);
+    router.refresh();
+  };
 
   if (status === 'success') {
     return (
@@ -150,40 +147,39 @@ router.refresh();
     );
   }
 
-  //Cuando se abra la aplicación a los padres deberé remplazar el if de arriba por lo siguiente:
-  /*
-  if (status === 'success') {
-    return (
-      <div className="bg-emerald-50 border border-emerald-200 p-8 md:p-12 rounded-xl text-center max-w-2xl mx-auto">
-        <h2 className="text-3xl font-bold text-emerald-800 mb-2">¡Pedido completado!</h2>
-        <p className="text-emerald-700 mb-8">Hemos registrado tu solicitud correctamente y los responsables ya han sido avisados.</p>
-        
-        {/* Recuadro de instrucciones de pago } //AQUI HAY QUE PONER EL CIERRE DE COMENTARIO 
-        <div className="bg-white p-6 rounded-lg shadow-sm border border-emerald-100 mb-8 text-left">
-          <h3 className="text-lg font-bold text-slate-800 mb-3">Instrucciones de Pago</h3>
-          <p className="text-sm text-slate-600 mb-4">Para formalizar el pedido, por favor realiza el pago mediante una de estas opciones:</p>
-          <ul className="text-sm text-slate-700 space-y-3 mb-4">
-            <li className="flex items-start gap-2">
-              <span>📱</span>
-              <span><strong>Bizum:</strong> Al número <span className="font-mono bg-slate-100 px-1 rounded">600 XX XX XX</span> (Poner en concepto el nombre introducido en el pedido).</span>
-            </li>
-            <li className="flex items-start gap-2">
-              <span>💵</span>
-              <span><strong>Efectivo:</strong> Entregar el importe exacto al responsable de la sección el próximo sábado.</span>
-            </li>
-          </ul>
-          <p className="text-xs text-amber-700 font-semibold bg-amber-50 p-3 rounded border border-amber-200">
-            ⚠️ Nota: Los artículos no se entregarán hasta que el equipo de responsables confirme el pago.
-          </p>
-        </div>
-
-        <button onClick={() => setStatus('idle')} className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded font-bold transition-colors">
-          Hacer otro pedido
-        </button>
-      </div>
-    );
-  }
-   */
+  // Cuando se abra la aplicación a los padres deberé remplazar el if de arriba por lo siguiente:
+  //
+  // if (status === 'success') {
+  //   return (
+  //     <div className="bg-emerald-50 border border-emerald-200 p-8 md:p-12 rounded-xl text-center max-w-2xl mx-auto">
+  //       <h2 className="text-3xl font-bold text-emerald-800 mb-2">¡Pedido completado!</h2>
+  //       <p className="text-emerald-700 mb-8">Hemos registrado tu solicitud correctamente y los responsables ya han sido avisados.</p>
+  //       
+  //       {/* Recuadro de instrucciones de pago */}
+  //       <div className="bg-white p-6 rounded-lg shadow-sm border border-emerald-100 mb-8 text-left">
+  //         <h3 className="text-lg font-bold text-slate-800 mb-3">Instrucciones de Pago</h3>
+  //         <p className="text-sm text-slate-600 mb-4">Para formalizar el pedido, por favor realiza el pago mediante una de estas opciones:</p>
+  //         <ul className="text-sm text-slate-700 space-y-3 mb-4">
+  //           <li className="flex items-start gap-2">
+  //             <span>📱</span>
+  //             <span><strong>Bizum:</strong> Al número <span className="font-mono bg-slate-100 px-1 rounded">600 XX XX XX</span> (Poner en concepto el nombre introducido en el pedido).</span>
+  //           </li>
+  //           <li className="flex items-start gap-2">
+  //             <span>💵</span>
+  //             <span><strong>Efectivo:</strong> Entregar el importe exacto al responsable de la sección el próximo sábado.</span>
+  //           </li>
+  //         </ul>
+  //         <p className="text-xs text-amber-700 font-semibold bg-amber-50 p-3 rounded border border-amber-200">
+  //           ⚠️ Nota: Los artículos no se entregarán hasta que el equipo de responsables confirme el pago.
+  //         </p>
+  //       </div>
+  //
+  //       <button onClick={() => setStatus('idle')} className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded font-bold transition-colors">
+  //         Hacer otro pedido
+  //       </button>
+  //     </div>
+  //   );
+  // }
 
   return (
     <div className="flex flex-col md:flex-row gap-8">
