@@ -1,6 +1,9 @@
 import { supabase } from '../lib/supabase';
 import StoreClient from '../components/StoreClient';
 
+// ---> ESTA ES LA LÍNEA MÁGICA QUE APAGA LA CACHÉ <---
+export const dynamic = 'force-dynamic'; 
+
 // Definición de tipos
 interface Variant {
   id: string;
@@ -27,7 +30,10 @@ async function getProducts(): Promise<Product[]> {
     return [];
   }
 
-  return data as Product[];
+  // NUEVO: Filtramos para que NO salgan los productos que no tienen tallas
+  const productosConTallas = (data as Product[]).filter(producto => producto.product_variants.length > 0);
+
+  return productosConTallas;
 }
 
 export default async function HomePage() {
