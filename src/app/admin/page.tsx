@@ -51,16 +51,31 @@ export default function AdminPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoggingIn(true);
-    const correctPassword = process.env.ADMIN_PASSWORD;
-    if (passwordInput === correctPassword && adminName.trim() !== '') {
-      const fechaActual = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Madrid" });
-      await supabase.from('admin_logs').insert([{ admin_name: adminName, created_at: fechaActual }]);
-      setIsLoggedIn(true);
-      setLoginError(false);
-    } else {
+    
+    try {
+      // Consultamos a nuestra ruta de API segura en el servidor
+      const res = await fetch('/api/admin-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: passwordInput }),
+      });
+
+      const data = await res.json();
+
+      if (data.success && adminName.trim() !== '') {
+        const fechaActual = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Madrid" });
+        await supabase.from('admin_logs').insert([{ admin_name: adminName, created_at: fechaActual }]);
+        setIsLoggedIn(true);
+        setLoginError(false);
+      } else {
+        setLoginError(true);
+        setPasswordInput('');
+      }
+    } catch (err) {
       setLoginError(true);
       setPasswordInput('');
     }
+
     setIsLoggingIn(false);
   };
 
