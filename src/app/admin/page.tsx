@@ -52,7 +52,6 @@ export default function AdminPage() {
       const res = await fetch('/api/login', {      
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // AQUÍ ENVIAMOS TANTO LA CONTRASEÑA COMO EL NOMBRE
         body: JSON.stringify({ password: passwordInput, name: adminName }),
       });
 
@@ -99,24 +98,22 @@ export default function AdminPage() {
     }
   };
 
-  const handleStockChange = async (variantId: string, currentStock: number, increment: number) => {
-    const newStock = Math.max(0, currentStock + increment);
-    if (newStock === currentStock) return;
-    setProducts(prev => prev.map(p => ({ ...p, product_variants: p.product_variants.map(v => v.id === variantId ? { ...v, stock: newStock } : v) })));
-    await supabase.from('product_variants').update({ stock: newStock }).eq('id', variantId);
-  };
-
-  const handleBulkStock = async (variantId: string, currentStock: number) => {
-    // ESTA ES LA FUNCIÓN QUE TE SUMA LAS CANTIDADES QUE TE LLEGAN DE GOLPE
-    const input = window.prompt(`Stock actual en almacén: ${currentStock} uds.\n\n¿Cuántas unidades NUEVAS te han llegado?\n(Escribe un número y se sumará automáticamente al stock actual. Si quieres quitar, pon un - delante, ej: -3)`);
+  // Función exclusiva para Poner / Quitar stock
+  const handleBulkChange = async (variantId: string, currentStock: number, type: 'add' | 'subtract') => {
+    const actionText = type === 'add' ? 'PONER' : 'QUITAR';
+    const input = window.prompt(`Stock actual: ${currentStock} uds.\n\n¿Cuántas unidades quieres ${actionText} de golpe?\n(Pon solo el número de unidades, ej: 5)`);
     
     if (!input || input.trim() === '') return;
     
-    const increment = parseInt(input, 10);
+    const amount = parseInt(input, 10);
     
-    if (isNaN(increment) || increment === 0) return;
+    if (isNaN(amount) || amount <= 0) return;
     
+    const increment = type === 'add' ? amount : -amount;
     const newStock = Math.max(0, currentStock + increment); 
+    
+    if (newStock === currentStock) return;
+    
     setProducts(prev => prev.map(p => ({ ...p, product_variants: p.product_variants.map(v => v.id === variantId ? { ...v, stock: newStock } : v) })));
     await supabase.from('product_variants').update({ stock: newStock }).eq('id', variantId);
   };
@@ -389,11 +386,27 @@ export default function AdminPage() {
                               <td className="p-4 font-bold text-center text-slate-700">{variant.size}</td>
                               <td className="p-4 font-semibold text-right text-slate-600">{variant.price.toFixed(2)} €</td>
                               <td className="p-4 text-right">
-                                <div className="flex items-center justify-end gap-2">
-                                  <button onClick={() => handleStockChange(variant.id, variant.stock, -1)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 w-6 h-6 rounded-lg font-bold flex items-center justify-center transition-colors">-</button>
-                                  <button onClick={() => handleBulkStock(variant.id, variant.stock)} className={`font-bold min-w-[32px] py-1 px-2 rounded-lg cursor-pointer hover:bg-slate-100 transition-colors text-center ${variant.stock < (product.min_stock_alert || 5) ? 'text-red-600 bg-red-50' : 'text-slate-800 bg-slate-50'}`}>{variant.stock}</button>
-                                  <button onClick={() => handleStockChange(variant.id, variant.stock, 1)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 w-6 h-6 rounded-lg font-bold flex items-center justify-center transition-colors">+</button>
+                                
+                                {/* AQUÍ ESTÁN LOS 2 BOTONES PRINCIPALES */}
+                                <div className="flex items-center justify-end gap-3">
+                                  
+                                  {/* Botón: Quitar */}
+                                  <button onClick={() => handleBulkChange(variant.id, variant.stock, 'subtract')} className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs" title="Restar stock">
+                                    Quitar
+                                  </button>
+
+                                  {/* Número actual de stock */}
+                                  <span className={`font-bold min-w-[32px] text-center text-sm ${variant.stock < (product.min_stock_alert || 5) ? 'text-red-600' : 'text-slate-800'}`}>
+                                    {variant.stock}
+                                  </span>
+                                  
+                                  {/* Botón: Poner */}
+                                  <button onClick={() => handleBulkChange(variant.id, variant.stock, 'add')} className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs" title="Añadir stock">
+                                    Poner
+                                  </button>
+
                                 </div>
+
                               </td>
                               <td className="p-4 text-center w-24 whitespace-nowrap">
                                 <button onClick={() => setEditingItem({ productId: product.id, variantId: variant.id, name: product.name, category: product.category, description: product.description || '', image_url: product.image_url || '', min_stock_alert: product.min_stock_alert ?? 5, size: variant.size, price: variant.price })} className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-purple-600 transition-all mr-3 text-sm" title="Editar">✏️</button>
