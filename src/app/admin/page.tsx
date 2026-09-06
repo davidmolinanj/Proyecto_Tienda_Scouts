@@ -5,7 +5,6 @@ import { supabase } from '../../lib/supabase';
 import Link from 'next/link';
 
 interface Variant { id: string; size: string; price: number; stock: number; }
-// NUEVO: Añadimos min_stock_alert a la interfaz
 interface Product { id: string; name: string; description: string; image_url: string; category: string; min_stock_alert: number; product_variants: Variant[]; }
 interface Order { id: string; buyer_name: string; scout_unit: string; total_amount: number; status: string; created_at: string; }
 
@@ -23,12 +22,10 @@ export default function AdminPage() {
   
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedProductId, setSelectedProductId] = useState('new'); 
-  // NUEVO: Añadido min_stock_alert por defecto a 5
   const [newProduct, setNewProduct] = useState({ name: '', description: '', image_url: '', category: 'Ropa', min_stock_alert: 5, size: 'M', price: 15, stock: 10 });
   const [searchTerm, setSearchTerm] = useState('');
   const [productSearchInput, setProductSearchInput] = useState('');
 
-  // NUEVO: Añadido min_stock_alert al estado de edición
   const [editingItem, setEditingItem] = useState<{ productId: string; variantId: string; name: string; category: string; description: string; image_url: string; min_stock_alert: number; size: string; price: number; } | null>(null);
 
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
@@ -37,7 +34,6 @@ export default function AdminPage() {
 
   async function fetchData() {
     setLoading(true);
-    // NUEVO: Pedimos min_stock_alert a Supabase
     const { data: invData } = await supabase.from('products').select(`id, name, description, image_url, category, min_stock_alert, product_variants (id, size, price, stock)`).order('name');
     if (invData) {
       const productosActivos = (invData as Product[]).filter(p => p.product_variants.length > 0);
@@ -56,7 +52,8 @@ export default function AdminPage() {
       const res = await fetch('/api/login', {      
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: passwordInput, name: adminName }), //Comprobamos contraseña y el nombre
+        // AQUÍ ENVIAMOS TANTO LA CONTRASEÑA COMO EL NOMBRE
+        body: JSON.stringify({ password: passwordInput, name: adminName }),
       });
 
       const data = await res.json();
@@ -110,10 +107,15 @@ export default function AdminPage() {
   };
 
   const handleBulkStock = async (variantId: string, currentStock: number) => {
-    const input = window.prompt(`Stock actual: ${currentStock} uds.\n\n¿Cuántas unidades quieres AÑADIR? \n(Si quieres quitar, escribe un número negativo, ej: -5):`);
-    if (!input) return;
+    // ESTA ES LA FUNCIÓN QUE TE SUMA LAS CANTIDADES QUE TE LLEGAN DE GOLPE
+    const input = window.prompt(`Stock actual en almacén: ${currentStock} uds.\n\n¿Cuántas unidades NUEVAS te han llegado?\n(Escribe un número y se sumará automáticamente al stock actual. Si quieres quitar, pon un - delante, ej: -3)`);
+    
+    if (!input || input.trim() === '') return;
+    
     const increment = parseInt(input, 10);
+    
     if (isNaN(increment) || increment === 0) return;
+    
     const newStock = Math.max(0, currentStock + increment); 
     setProducts(prev => prev.map(p => ({ ...p, product_variants: p.product_variants.map(v => v.id === variantId ? { ...v, stock: newStock } : v) })));
     await supabase.from('product_variants').update({ stock: newStock }).eq('id', variantId);
@@ -135,7 +137,6 @@ export default function AdminPage() {
       if (prodErr || !prodData) { alert("Error al crear el producto."); setLoading(false); return; }
       productIdToUse = prodData.id;
     } else {
-      // Si se añade una talla a un producto existente, actualizamos por si cambió el aviso mínimo
       await supabase.from('products').update({ min_stock_alert: newProduct.min_stock_alert }).eq('id', productIdToUse);
     }
     const { error: varErr } = await supabase.from('product_variants').insert([{ product_id: productIdToUse, size: newProduct.size, price: newProduct.price, stock: newProduct.stock }]);
@@ -350,7 +351,6 @@ export default function AdminPage() {
                         </>
                       )}
 
-                      {/* NUEVO: Campo para configurar el aviso de stock mínimo */}
                       <div>
                         <label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Avisar a Telegram si quedan menos de: (Stock mínimo)</label>
                         <input type="number" required value={newProduct.min_stock_alert} onChange={e => setNewProduct({...newProduct, min_stock_alert: parseInt(e.target.value) || 5})} className="w-full sm:w-1/3 p-2.5 bg-white border border-slate-200 rounded-xl text-xs" />
@@ -391,7 +391,6 @@ export default function AdminPage() {
                               <td className="p-4 text-right">
                                 <div className="flex items-center justify-end gap-2">
                                   <button onClick={() => handleStockChange(variant.id, variant.stock, -1)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 w-6 h-6 rounded-lg font-bold flex items-center justify-center transition-colors">-</button>
-                                  {/* Nota: Cambia el color si baja del umbral personalizado de ese producto */}
                                   <button onClick={() => handleBulkStock(variant.id, variant.stock)} className={`font-bold min-w-[32px] py-1 px-2 rounded-lg cursor-pointer hover:bg-slate-100 transition-colors text-center ${variant.stock < (product.min_stock_alert || 5) ? 'text-red-600 bg-red-50' : 'text-slate-800 bg-slate-50'}`}>{variant.stock}</button>
                                   <button onClick={() => handleStockChange(variant.id, variant.stock, 1)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 w-6 h-6 rounded-lg font-bold flex items-center justify-center transition-colors">+</button>
                                 </div>
