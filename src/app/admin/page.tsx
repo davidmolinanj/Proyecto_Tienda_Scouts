@@ -56,7 +56,7 @@ export default function AdminPage() {
       const res = await fetch('/api/login', {      
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: passwordInput }),
+        body: JSON.stringify({ password: passwordInput, name: adminName }), //Comprobamos contraseña y el nombre
       });
 
       const data = await res.json();
