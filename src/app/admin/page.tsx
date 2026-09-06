@@ -53,7 +53,6 @@ export default function AdminPage() {
     setIsLoggingIn(true);
     
     try {
-      // Consultamos a nuestra ruta de API segura en el servidor
       const res = await fetch('/api/admin-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -62,7 +61,7 @@ export default function AdminPage() {
 
       const data = await res.json();
 
-      if (data.success && adminName.trim() !== '') {
+      if (res.ok && data.success && adminName.trim() !== '') {
         const fechaActual = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Madrid" });
         await supabase.from('admin_logs').insert([{ admin_name: adminName, created_at: fechaActual }]);
         setIsLoggedIn(true);
