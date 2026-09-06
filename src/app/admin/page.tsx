@@ -51,7 +51,7 @@ export default function AdminPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoggingIn(true);
-    const correctPassword = process.env.NEXT_PUBLIC_ADMIN_PASSWORD;
+    const correctPassword = process.env.ADMIN_PASSWORD;
     if (passwordInput === correctPassword && adminName.trim() !== '') {
       const fechaActual = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Madrid" });
       await supabase.from('admin_logs').insert([{ admin_name: adminName, created_at: fechaActual }]);
