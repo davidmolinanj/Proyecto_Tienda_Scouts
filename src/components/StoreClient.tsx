@@ -4,267 +4,305 @@ import { useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useRouter } from 'next/navigation';
 
-// Función para mandar mensajes a Telegram (Colocada fuera para que no se repita)
 const avisarPorTelegram = async (mensaje: string) => {
   const token = process.env.NEXT_PUBLIC_TELEGRAM_TOKEN;
   const chatId = process.env.NEXT_PUBLIC_TELEGRAM_CHAT_ID;
-  
   if (!token || !chatId) return;
-
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-
-  try {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: mensaje,
-      }),
-    });
-  } catch (error) {
-    console.error("Error al avisar por Telegram:", error);
-  }
+  try { await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: mensaje }) }); } catch (error) { console.error(error); }
 };
 
-// Tipos de datos
 interface Variant { id: string; size: string; price: number; stock: number; }
-interface Product { id: string; name: string; description?: string;category: string; product_variants: Variant[]; }
-interface CartItem { variant_id: string; product_name: string; size: string; price: number; quantity: number; }
+interface Product { id: string; name: string; description?: string; image_url?: string; category: string; min_stock_alert?: number; product_variants: Variant[]; }
+interface CartItem { variant_id: string; product_name: string; size: string; price: number; quantity: number; max_stock: number; }
 
 export default function StoreClient({ products }: { products: Product[] }) {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [buyerName, setBuyerName] = useState('');
-  const [scoutUnit, setScoutUnit] = useState('');
+  // CAMBIO: Por defecto seleccionamos "Manada" o dejamos vacío para obligar/facilitar
+  const [scoutUnit, setScoutUnit] = useState('Manada');
   const [status, setStatus] = useState<'idle' | 'loading' | 'success'>('idle');
+  
+  const [activeDescription, setActiveDescription] = useState<Product | null>(null);
+  const [selectedVariants, setSelectedVariants] = useState<{ [productId: string]: string }>({});
 
   const router = useRouter();
 
-  const addToCart = (product: Product, variant: Variant) => {
+  const sortVariants = (variants: Variant[]) => {
+    const sizeOrder: { [key: string]: number } = {
+      'xs': 1, 's': 2, 'm': 3, 'l': 4, 'xl': 5, 'xxl': 6, '3xl': 7,
+      '3-4': 10, '5-6': 11, '7-8': 12, '9-10': 13, '11-12': 14,
+      'única': 99, 'unica': 99
+    };
+
+    return [...variants].sort((a, b) => {
+      const sizeA = a.size.toLowerCase().trim();
+      const sizeB = b.size.toLowerCase().trim();
+
+      if (sizeOrder[sizeA] && sizeOrder[sizeB]) {
+        return sizeOrder[sizeA] - sizeOrder[sizeB];
+      }
+      if (sizeOrder[sizeA]) return -1;
+      if (sizeOrder[sizeB]) return 1;
+
+      const numA = parseFloat(sizeA);
+      const numB = parseFloat(sizeB);
+      if (!isNaN(numA) && !isNaN(numB)) {
+        return numA - numB;
+      }
+
+      return sizeA.localeCompare(sizeB);
+    });
+  };
+
+  const handleVariantChange = (productId: string, variantId: string) => {
+    setSelectedVariants(prev => ({ ...prev, [productId]: variantId }));
+  };
+
+  const addToCart = (product: Product) => {
+    const sortedVars = sortVariants(product.product_variants);
+    const defaultVariantId = selectedVariants[product.id] || sortedVars[0]?.id;
+    const variant = sortedVars.find(v => v.id === defaultVariantId);
+    if (!variant || variant.stock === 0) return;
+
     setCart((prev) => {
       const existing = prev.find((item) => item.variant_id === variant.id);
       if (existing) {
         if (existing.quantity >= variant.stock) return prev;
         return prev.map((item) => item.variant_id === variant.id ? { ...item, quantity: item.quantity + 1 } : item);
       }
-      return [...prev, { variant_id: variant.id, product_name: product.name, size: variant.size, price: variant.price, quantity: 1 }];
+      return [...prev, { variant_id: variant.id, product_name: product.name, size: variant.size, price: variant.price, quantity: 1, max_stock: variant.stock }];
     });
   };
 
-  // Función para eliminar un producto entero del carrito
-  const removeFromCart = (variant_id: string) => {
-    setCart((prev) => prev.filter((item) => item.variant_id !== variant_id));
+  const updateQuantity = (variant_id: string, delta: number) => {
+    setCart((prev) => {
+      return prev.map(item => {
+        if (item.variant_id === variant_id) {
+          const newQty = item.quantity + delta;
+          if (newQty <= 0) return null;
+          if (newQty > item.max_stock) return item;
+          return { ...item, quantity: newQty };
+        }
+        return item;
+      }).filter(Boolean) as CartItem[];
+    });
   };
 
+  const removeFromCart = (variant_id: string) => setCart((prev) => prev.filter((item) => item.variant_id !== variant_id));
   const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
   const handleCheckout = async () => {
-    if (!buyerName.trim()) {
-      alert('Por favor, introduce tu nombre para el pedido.');
-      return;
-    }
-
+    if (!buyerName.trim()) { alert('Por favor, introduce tu nombre para el pedido.'); return; }
     setStatus('loading');
+    const { data: orderData, error: orderError } = await supabase.from('orders').insert([{ buyer_name: buyerName, scout_unit: scoutUnit, total_amount: total }]).select('id').single();
+    if (orderError || !orderData) { alert('Error: ' + orderError?.message); setStatus('idle'); return; }
 
-    // 1. Crear la cabecera del pedido
-    const { data: orderData, error: orderError } = await supabase
-      .from('orders')
-      .insert([{ buyer_name: buyerName, scout_unit: scoutUnit, total_amount: total }])
-      .select('id')
-      .single();
-
-    if (orderError || !orderData) {
-      alert('Hubo un error al crear el pedido: ' + orderError?.message);
-      setStatus('idle');
-      return;
-    }
-
-    // 2. Crear las líneas de los productos
-    const itemsToInsert = cart.map(item => ({
-      order_id: orderData.id,
-      variant_id: item.variant_id,
-      quantity: item.quantity,
-      unit_price: item.price
-    }));
-
+    const itemsToInsert = cart.map(item => ({ order_id: orderData.id, variant_id: item.variant_id, quantity: item.quantity, unit_price: item.price }));
     const { error: itemsError } = await supabase.from('order_items').insert(itemsToInsert);
+    if (itemsError) { alert('Error: ' + itemsError.message); setStatus('idle'); return; }
 
-    if (itemsError) {
-      alert('Hubo un error al guardar los productos: ' + itemsError.message);
-      setStatus('idle');
-      return;
-    }
-
-    // 3. Descontar el stock de Supabase (VERSIÓN MEJORADA)
     for (const item of cart) {
-      const { data: variantInfo, error: selectError } = await supabase
-        .from('product_variants')
-        .select('stock, size')
-        .eq('id', item.variant_id)
-        .single();
-
-      if (selectError) {
-        alert("¡Aviso! No se pudo leer el stock actual: " + selectError.message);
-      }
-
+      const { data: variantInfo } = await supabase.from('product_variants').select('stock, size, products (name, min_stock_alert)').eq('id', item.variant_id).single();
       if (variantInfo) {
         const stockRestante = variantInfo.stock - item.quantity;
+        await supabase.from('product_variants').update({ stock: stockRestante }).eq('id', item.variant_id);
+        
+        // @ts-ignore
+        const limiteAlerta = variantInfo.products?.min_stock_alert ?? 5;
 
-        const { error: updateError } = await supabase
-          .from('product_variants')
-          .update({ stock: stockRestante })
-          .eq('id', item.variant_id);
-
-        if (updateError) {
-          alert("¡Aviso! No se pudo restar el stock: " + updateError.message);
-        }
-
-        if (stockRestante < 5) {
-          const mensajeAlarma = `🚨 ¡Alerta de Almacén Scout!\n\nEl artículo "${item.product_name}" (Talla: ${variantInfo.size}) se está agotando.\n⚠️ Solo quedan: ${stockRestante} unidades.`;
-          await avisarPorTelegram(mensajeAlarma);
+        if (stockRestante <= limiteAlerta) {
+          await avisarPorTelegram(`🚨 Alerta Almacén\nEl artículo "${item.product_name}" (Talla: ${variantInfo.size}) se está agotando.\n⚠️ Quedan: ${stockRestante} uds.`);
         }
       }
     }
-
-    // Aviso general del nuevo pedido
-    await avisarPorTelegram(`✅ Nuevo pedido de ${buyerName} (${scoutUnit}): ${total} €`);
-
-    // 4. ¡Éxito!
-    setStatus('success');
-    setCart([]);
-    router.refresh();
+    await avisarPorTelegram(`✅ Nuevo pedido de ${buyerName} (Rama: ${scoutUnit}): ${total} €`);
+    setStatus('success'); setCart([]); router.refresh();
   };
 
   if (status === 'success') {
     return (
-      <div className="bg-emerald-50 border border-emerald-200 p-12 rounded-xl text-center">
-        <h2 className="text-3xl font-bold text-emerald-800 mb-4">¡Pedido completado!</h2>
-        <p className="text-emerald-700 mb-6">Hemos registrado tu solicitud correctamente.</p>
-        <button onClick={() => setStatus('idle')} className="bg-emerald-600 text-white px-6 py-2 rounded font-bold">
+      <div className="bg-white shadow-sm border border-slate-200/80 p-12 rounded-2xl text-center max-w-xl mx-auto my-12">
+        <h2 className="text-2xl font-bold text-slate-900 mb-2">¡Pedido registrado con éxito! ⚜️</h2>
+        <p className="text-slate-500 mb-6 text-sm">Hemos enviado tu solicitud correctamente a los responsables.</p>
+        <button onClick={() => setStatus('idle')} className="bg-slate-900 hover:bg-slate-800 text-white px-6 py-2.5 rounded-xl font-semibold text-sm transition-colors">
           Hacer otro pedido
         </button>
       </div>
     );
   }
 
-  // Cuando se abra la aplicación a los padres deberé remplazar el if de arriba por lo siguiente:
-  //
-  // if (status === 'success') {
-  //   return (
-  //     <div className="bg-emerald-50 border border-emerald-200 p-8 md:p-12 rounded-xl text-center max-w-2xl mx-auto">
-  //       <h2 className="text-3xl font-bold text-emerald-800 mb-2">¡Pedido completado!</h2>
-  //       <p className="text-emerald-700 mb-8">Hemos registrado tu solicitud correctamente y los responsables ya han sido avisados.</p>
-  //       
-  //       {/* Recuadro de instrucciones de pago */}
-  //       <div className="bg-white p-6 rounded-lg shadow-sm border border-emerald-100 mb-8 text-left">
-  //         <h3 className="text-lg font-bold text-slate-800 mb-3">Instrucciones de Pago</h3>
-  //         <p className="text-sm text-slate-600 mb-4">Para formalizar el pedido, por favor realiza el pago mediante una de estas opciones:</p>
-  //         <ul className="text-sm text-slate-700 space-y-3 mb-4">
-  //           <li className="flex items-start gap-2">
-  //             <span>📱</span>
-  //             <span><strong>Bizum:</strong> Al número <span className="font-mono bg-slate-100 px-1 rounded">600 XX XX XX</span> (Poner en concepto el nombre introducido en el pedido).</span>
-  //           </li>
-  //           <li className="flex items-start gap-2">
-  //             <span>💵</span>
-  //             <span><strong>Efectivo:</strong> Entregar el importe exacto al responsable de la sección el próximo sábado.</span>
-  //           </li>
-  //         </ul>
-  //         <p className="text-xs text-amber-700 font-semibold bg-amber-50 p-3 rounded border border-amber-200">
-  //           ⚠️ Nota: Los artículos no se entregarán hasta que el equipo de responsables confirme el pago.
-  //         </p>
-  //       </div>
-  //
-  //       <button onClick={() => setStatus('idle')} className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded font-bold transition-colors">
-  //         Hacer otro pedido
-  //       </button>
-  //     </div>
-  //   );
-  // }
-
   return (
-    <div className="flex flex-col md:flex-row gap-8">
-      {/* Columna Izquierda: Productos */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {products.map((product) => (
-          <div key={product.id} className="bg-white p-6 rounded-xl border shadow-sm">
-            <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-1 rounded">{product.category}</span>
-            <h2 className="text-xl font-bold text-slate-800 mt-2">{product.name}</h2>
-            {product.description && (
-              <details className="mt-2 text-sm text-slate-600 cursor-pointer group">
-                <summary className="font-semibold text-emerald-700 hover:text-emerald-800 outline-none list-none flex items-center gap-1 select-none">
-                  <span className="text-xs group-open:rotate-90 transition-transform duration-200">▶</span> 
-                  Ver descripción
-                </summary>
-                <p className="mt-2 mb-4 pl-3 border-l-2 border-emerald-300 text-slate-500 leading-relaxed">
-                  {product.description}
-                </p>
-              </details>
-)}
-            <ul className="mt-4 divide-y divide-slate-100">
-              {product.product_variants.map((variant) => (
-                <li key={variant.id} className="py-3 flex justify-between items-center">
-                  <div>
-                    <p className="text-sm text-slate-600">Talla: <strong className="text-slate-800">{variant.size}</strong></p>
-                    <p className="text-xs text-slate-500">{variant.stock} disp.</p>
+    <div className="flex flex-col lg:flex-row gap-8 items-start relative">
+      
+      {/* REJILLA DE PRODUCTOS CON FLEXBOX CENTRADO */}
+      <div className="flex-1 flex flex-wrap justify-center gap-6">
+        {products.map((product) => {
+          const sortedVariants = sortVariants(product.product_variants);
+          const currentVariantId = selectedVariants[product.id] || sortedVariants[0]?.id;
+          const selectedVariant = sortedVariants.find(v => v.id === currentVariantId) || sortedVariants[0];
+          
+          const hasMultipleVariants = sortedVariants.length > 1;
+
+          return (
+            <div key={product.id} className="bg-white rounded-2xl shadow-sm hover:shadow-md transition-all duration-300 overflow-hidden border border-slate-200/70 flex flex-col w-full sm:w-[calc(50%-12px)] lg:w-[calc(33.333%-16px)] max-w-sm">
+              
+              {/* Imagen limpia */}
+              <div className="w-full h-52 bg-slate-50/50 flex items-center justify-center p-6 relative border-b border-slate-100">
+                {product.image_url ? (
+                  <img src={product.image_url} alt={product.name} className="max-w-full max-h-full object-contain hover:scale-105 transition-transform duration-300" />
+                ) : (
+                  <span className="text-4xl opacity-20">⛺</span>
+                )}
+                <span className="absolute top-3 left-3 bg-white/80 backdrop-blur-sm text-slate-700 text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-md border border-slate-200/60 shadow-xs">
+                  {product.category}
+                </span>
+              </div>
+              
+              <div className="p-5 flex-1 flex flex-col justify-between">
+                <div>
+                  <div className="flex justify-between items-start gap-2">
+                    <h2 className="text-lg font-bold text-slate-900">{product.name}</h2>
+                    {product.description && (
+                      <button onClick={() => setActiveDescription(product)} className="text-xs font-medium text-purple-700 hover:text-purple-900 underline underline-offset-4 shrink-0 transition-colors pt-1">
+                        Descripción
+                      </button>
+                    )}
                   </div>
-                  <div className="text-right flex flex-col items-end gap-2">
-                    <span className="font-semibold">{Number(variant.price).toFixed(2)} €</span>
-                    <button onClick={() => addToCart(product, variant)} disabled={variant.stock === 0} className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-xs font-bold py-1 px-4 rounded">
-                      Añadir
-                    </button>
+                </div>
+
+                {/* BLOQUE INFERIOR */}
+                <div className="mt-6 pt-4 border-t border-slate-100 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1 mr-3">
+                      {hasMultipleVariants ? (
+                        <>
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Seleccionar Talla</label>
+                          <select 
+                            value={currentVariantId} 
+                            onChange={(e) => handleVariantChange(product.id, e.target.value)}
+                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 outline-none focus:border-purple-600 transition-colors cursor-pointer">
+                            {sortedVariants.map((v) => (
+                              <option key={v.id} value={v.id}>
+                                Talla {v.size} {v.stock === 0 ? '(Agotado)' : `(${v.stock} disp.)`}
+                              </option>
+                            ))}
+                          </select>
+                        </>
+                      ) : (
+                        <>
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Talla / Modelo</label>
+                          <div className="text-xs font-bold text-slate-800 py-2">
+                            {selectedVariant.size} <span className="font-normal text-slate-400">({selectedVariant.stock} disp.)</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="text-right">
+                      <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Precio</span>
+                      <span className="font-extrabold text-slate-900 text-base">{Number(selectedVariant?.price || 0).toFixed(2)} €</span>
+                    </div>
                   </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
+
+                  <button 
+                    onClick={() => addToCart(product)} 
+                    disabled={selectedVariant?.stock === 0} 
+                    className="w-full bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-300 text-white font-semibold text-xs py-2.5 px-4 rounded-xl transition-colors shadow-xs">
+                    {selectedVariant?.stock === 0 ? 'Agotado' : 'Añadir a la cesta'}
+                  </button>
+                </div>
+
+              </div>
+            </div>
+          );
+        })}
       </div>
 
-      {/* Columna Derecha: Carrito y Formulario */}
-      <div className="w-full md:w-80 bg-white p-6 rounded-xl border shadow-sm h-fit sticky top-6">
-        <h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4">Tu Pedido</h3>
+      {/* CARRITO A LA DERECHA */}
+      <div className="w-full lg:w-[360px] lg:sticky lg:top-6 bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80 shrink-0">
+        <h3 className="text-base font-bold text-slate-900 border-b border-slate-100 pb-3 mb-4 flex items-center justify-between">
+          <span>🛒 Tu Pedido</span>
+          <span className="text-xs font-semibold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full">{cart.length} ítems</span>
+        </h3>
+        
         {cart.length === 0 ? (
-          <p className="text-sm text-slate-500 text-center py-4">El carrito está vacío.</p>
+          <p className="text-xs text-slate-400 text-center py-6">El carrito está vacío.</p>
         ) : (
           <>
-            <ul className="space-y-3 mb-6 border-b pb-4">
+            <ul className="space-y-3 mb-5 max-h-60 overflow-y-auto pr-1">
               {cart.map((item) => (
-                <li key={item.variant_id} className="text-sm flex justify-between items-start">
-                    <div className="flex flex-col">
-                        <span><strong>{item.quantity}x</strong> {item.product_name} ({item.size})</span>
-                        <button 
-                        onClick={() => removeFromCart(item.variant_id)} 
-                        className="text-xs text-red-500 hover:text-red-700 text-left mt-1 underline transition-colors"
-                        >
-                        Quitar
-                        </button>
+                <li key={item.variant_id} className="text-xs flex justify-between items-center bg-slate-50/50 p-2.5 rounded-xl border border-slate-100">
+                    <div className="flex flex-col flex-1 mr-2">
+                        <span className="text-slate-800 font-medium">
+                          {item.product_name} <span className="text-purple-700 font-bold">({item.size})</span>
+                        </span>
+                        <div className="flex items-center gap-2 mt-2">
+                          <div className="flex items-center border border-slate-200 bg-white rounded-lg overflow-hidden">
+                            <button onClick={() => updateQuantity(item.variant_id, -1)} className="px-2 py-0.5 text-slate-600 hover:bg-slate-100 font-bold">-</button>
+                            <span className="px-2 py-0.5 font-bold text-slate-800">{item.quantity}</span>
+                            <button onClick={() => updateQuantity(item.variant_id, 1)} className="px-2 py-0.5 text-slate-600 hover:bg-slate-100 font-bold">+</button>
+                          </div>
+                          <button onClick={() => removeFromCart(item.variant_id)} className="text-[10px] font-semibold text-red-500 hover:text-red-700 transition-colors">Quitar</button>
+                        </div>
                     </div>
-                    <span className="font-semibold mt-1">{(item.price * item.quantity).toFixed(2)} €</span>
+                    <span className="font-bold text-slate-900 shrink-0">{(item.price * item.quantity).toFixed(2)} €</span>
                 </li>
               ))}
             </ul>
-            <div className="flex justify-between items-center mb-6">
-              <span className="font-bold">Total:</span>
-              <span className="font-bold text-emerald-700 text-2xl">{total.toFixed(2)} €</span>
+            
+            <div className="flex justify-between items-center mb-5 pt-3 border-t border-slate-100">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Total</span>
+              <span className="font-extrabold text-purple-700 text-xl">{total.toFixed(2)} €</span>
             </div>
             
-            <div className="space-y-4 mb-6">
+            <div className="space-y-3 mb-5">
               <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Tu Nombre *</label>
-                <input type="text" value={buyerName} onChange={(e) => setBuyerName(e.target.value)} className="w-full border p-2 rounded text-sm" placeholder="Ej: David" />
+                <label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Tu Nombre *</label>
+                <input type="text" value={buyerName} onChange={(e) => setBuyerName(e.target.value)} className="w-full border border-slate-200 p-2.5 rounded-xl text-xs outline-none focus:border-purple-600 transition-colors bg-slate-50/50" placeholder="Ej: Baloo" />
               </div>
+              
+              {/* CAMBIO: Selector desplegable para las Ramas en lugar de texto libre */}
               <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Sección Scout (Opcional)</label>
-                <input type="text" value={scoutUnit} onChange={(e) => setScoutUnit(e.target.value)} className="w-full border p-2 rounded text-sm" placeholder="Ej: Tropa" />
+                <label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Rama</label>
+                <select 
+                  value={scoutUnit} 
+                  onChange={(e) => setScoutUnit(e.target.value)} 
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-semibold text-slate-800 outline-none focus:border-purple-600 transition-colors cursor-pointer">
+                  <option value="Manada">🐺 Manada</option>
+                  <option value="Tropa">⚜️ Tropa</option>
+                  <option value="Pioneros">🧭 Pioneros</option>
+                  <option value="Rovers">🔥 Rovers</option>
+                  <option value="Padres">⛺ Padres / Comité</option>
+                </select>
               </div>
             </div>
-
-            <button onClick={handleCheckout} disabled={status === 'loading'} className="w-full bg-slate-900 hover:bg-slate-800 disabled:bg-slate-500 text-white font-bold py-3 px-4 rounded transition-colors">
-              {status === 'loading' ? 'Enviando...' : 'Confirmar Pedido'}
+            
+            <button onClick={handleCheckout} disabled={status === 'loading'} className="w-full bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-bold text-xs py-3 px-4 rounded-xl transition-colors shadow-xs">
+              {status === 'loading' ? 'Procesando...' : 'Confirmar Pedido'}
             </button>
           </>
         )}
       </div>
+
+      {/* VENTANA FLOTANTE DE DESCRIPCIÓN */}
+      {activeDescription && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-100">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <h3 className="font-bold text-slate-900 text-base">{activeDescription.name}</h3>
+              <button onClick={() => setActiveDescription(null)} className="w-8 h-8 rounded-full bg-slate-200/60 hover:bg-slate-200 text-slate-600 font-bold flex items-center justify-center transition-colors">&times;</button>
+            </div>
+            <div className="p-6">
+              <p className="text-sm text-slate-600 leading-relaxed whitespace-pre-line">{activeDescription.description}</p>
+            </div>
+            <div className="px-6 py-3 bg-slate-50/50 border-t border-slate-100 flex justify-end">
+              <button onClick={() => setActiveDescription(null)} className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold px-4 py-2 rounded-xl transition-colors">Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
