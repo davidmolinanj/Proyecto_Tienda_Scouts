@@ -5,14 +5,14 @@ import { supabase } from '../../lib/supabase';
 import Link from 'next/link';
 
 interface Variant { id: string; size: string; price: number; stock: number; }
-interface Product { id: string; name: string; category: string; product_variants: Variant[]; }
+interface Product { id: string; name: string; category: string; description?: string; product_variants: Variant[]; }
 interface Order { id: string; buyer_name: string; scout_unit: string; total_amount: number; status: string; created_at: string; }
 
 export default function AdminPage() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [adminName, setAdminName] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
-  const [loginError, setLoginError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   const [activeTab, setActiveTab] = useState<'orders' | 'inventory'>('orders');
@@ -22,16 +22,15 @@ export default function AdminPage() {
   
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedProductId, setSelectedProductId] = useState('new'); 
-  const [newProduct, setNewProduct] = useState({ name: '', category: 'Ropa', size: 'M', price: 15, stock: 10 });
+  const [newProduct, setNewProduct] = useState({ name: '', category: 'Ropa', description: '', size: 'M', price: 15, stock: 10 });
 
-  // --- NUEVO: ESTADO PARA EL BUSCADOR ---
   const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => { if (isLoggedIn) fetchData(); }, [isLoggedIn]);
 
   async function fetchData() {
     setLoading(true);
-    const { data: invData } = await supabase.from('products').select(`id, name, category, product_variants (id, size, price, stock)`).order('name');
+    const { data: invData } = await supabase.from('products').select(`id, name, category, description, product_variants (id, size, price, stock)`).order('name');
     if (invData) {
       const productosActivos = (invData as Product[]).filter(p => p.product_variants.length > 0);
       setProducts(productosActivos);
@@ -44,16 +43,35 @@ export default function AdminPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoggingIn(true);
+    setErrorMessage('');
+
     const correctPassword = process.env.NEXT_PUBLIC_ADMIN_PASSWORD;
-    if (passwordInput === correctPassword && adminName.trim() !== '') {
-      const fechaActual = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Madrid" });
-      await supabase.from('admin_logs').insert([{ admin_name: adminName, created_at: fechaActual }]);
-      setIsLoggedIn(true);
-      setLoginError(false);
-    } else {
-      setLoginError(true);
+    const rawWhitelist = process.env.NEXT_PUBLIC_ADMIN_WHITELIST || '';
+
+    const allowedUsers = rawWhitelist
+      .split(',')
+      .map(name => name.trim().toLowerCase())
+      .filter(name => name.length > 0);
+
+    const enteredName = adminName.trim().toLowerCase();
+
+    if (passwordInput !== correctPassword) {
+      setErrorMessage('Contraseña incorrecta.');
       setPasswordInput('');
+      setIsLoggingIn(false);
+      return;
     }
+
+    if (allowedUsers.length > 0 && !allowedUsers.includes(enteredName)) {
+      setErrorMessage(`El usuario "${adminName.trim()}" no está autorizado en este panel.`);
+      setIsLoggingIn(false);
+      return;
+    }
+
+    const fechaActual = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Madrid" });
+    await supabase.from('admin_logs').insert([{ admin_name: adminName.trim(), created_at: fechaActual }]);
+    
+    setIsLoggedIn(true);
     setIsLoggingIn(false);
   };
 
@@ -62,21 +80,69 @@ export default function AdminPage() {
     await supabase.from('orders').update({ status: newStatus }).eq('id', orderId);
   };
 
-  const handleStockChange = async (variantId: string, currentStock: number, increment: number) => {
-    const newStock = Math.max(0, currentStock + increment);
+  // Modificar stock de 1 en 1
+  const handleStockStep = async (variantId: string, currentStock: number, delta: number) => {
+    const newStock = Math.max(0, currentStock + delta);
     if (newStock === currentStock) return;
-    setProducts(prev => prev.map(p => ({ ...p, product_variants: p.product_variants.map(v => v.id === variantId ? { ...v, stock: newStock } : v) })));
+    setProducts(prev => prev.map(p => ({
+      ...p,
+      product_variants: p.product_variants.map(v => v.id === variantId ? { ...v, stock: newStock } : v)
+    })));
     await supabase.from('product_variants').update({ stock: newStock }).eq('id', variantId);
   };
 
-  const handleDeleteVariant = async (variantId: string) => {
-    if (!window.confirm("¿Seguro que quieres eliminar esta talla/producto?")) return;
-    const { error } = await supabase.from('product_variants').delete().eq('id', variantId);
-    if (error) {
-      alert("⚠️ No puedes borrar este artículo porque ya hay pedidos registrados con él (rompería el historial). ¡Pon su stock a 0 en su lugar para ocultarlo!");
-    } else {
-      fetchData(); 
+  // Modificar stock por lote
+  const handleModifyStock = async (variantId: string, currentStock: number, mode: 'add' | 'remove') => {
+    const actionText = mode === 'add' ? 'añadir al' : 'quitar del';
+    const input = window.prompt(
+      `Stock actual: ${currentStock} uds.\n\n¿Cuántas unidades quieres ${actionText} stock?`
+    );
+    
+    if (!input) return;
+    
+    const amount = parseInt(input, 10);
+    if (isNaN(amount) || amount <= 0) {
+      alert("Por favor, introduce un número válido mayor que 0.");
+      return;
     }
+
+    const newStock = mode === 'add' 
+      ? currentStock + amount 
+      : Math.max(0, currentStock - amount);
+
+    setProducts(prev => prev.map(p => ({
+      ...p,
+      product_variants: p.product_variants.map(v => v.id === variantId ? { ...v, stock: newStock } : v)
+    })));
+
+    await supabase.from('product_variants').update({ stock: newStock }).eq('id', variantId);
+  };
+
+  // Borrar variante y, si no quedan más tallas, borrar el producto padre
+  const handleDeleteVariant = async (variantId: string, productId: string) => {
+    if (!window.confirm("¿Seguro que quieres eliminar esta talla?")) return;
+
+    // 1. Borrar la talla
+    const { error: variantError } = await supabase.from('product_variants').delete().eq('id', variantId);
+    
+    if (variantError) {
+      alert("⚠️ No se puede eliminar: " + variantError.message);
+      return;
+    }
+
+    // 2. Comprobar si al producto le queda alguna otra talla
+    const { data: remainingVariants } = await supabase
+      .from('product_variants')
+      .select('id')
+      .eq('product_id', productId);
+
+    // Si ya no queda ninguna talla, eliminamos el producto padre en 'products'
+    if (!remainingVariants || remainingVariants.length === 0) {
+      await supabase.from('products').delete().eq('id', productId);
+    }
+
+    // 3. Recargar la tabla
+    fetchData(); 
   };
 
   const handleAddNewProduct = async (e: React.FormEvent) => {
@@ -84,7 +150,16 @@ export default function AdminPage() {
     setLoading(true);
     let productIdToUse = selectedProductId;
     if (selectedProductId === 'new') {
-      const { data: prodData, error: prodErr } = await supabase.from('products').insert([{ name: newProduct.name, category: newProduct.category }]).select('id').single();
+      const { data: prodData, error: prodErr } = await supabase
+        .from('products')
+        .insert([{ 
+          name: newProduct.name, 
+          category: newProduct.category,
+          description: newProduct.description 
+        }])
+        .select('id')
+        .single();
+
       if (prodErr || !prodData) { alert("Error al crear el producto."); setLoading(false); return; }
       productIdToUse = prodData.id;
     }
@@ -92,18 +167,18 @@ export default function AdminPage() {
     if (varErr) { alert("Error al añadir la talla."); } else {
       alert("¡Añadido con éxito!");
       setShowAddForm(false);
-      setNewProduct({ name: '', category: 'Ropa', size: 'M', price: 15, stock: 10 });
+      setNewProduct({ name: '', category: 'Ropa', description: '', size: 'M', price: 15, stock: 10 });
       setSelectedProductId('new'); 
       fetchData();
     }
   };
 
-  // --- NUEVO: FILTRO INTELIGENTE PARA EL BUSCADOR ---
   const filteredProducts = products.filter(product => {
     const matchName = product.name.toLowerCase().includes(searchTerm.toLowerCase());
     const matchCategory = product.category.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchDesc = (product.description || '').toLowerCase().includes(searchTerm.toLowerCase());
     const matchSize = product.product_variants.some(v => v.size.toLowerCase().includes(searchTerm.toLowerCase()));
-    return matchName || matchCategory || matchSize;
+    return matchName || matchCategory || matchDesc || matchSize;
   });
 
   if (!isLoggedIn) {
@@ -112,11 +187,34 @@ export default function AdminPage() {
         <div className="bg-white p-8 rounded-xl shadow-md max-w-sm w-full border border-slate-200 text-center">
           <div className="text-4xl mb-4">🔐</div>
           <h2 className="text-2xl font-bold text-slate-900 mb-2">Acceso Restringido</h2>
-          <p className="text-slate-500 text-sm mb-6">Por seguridad, todos los accesos a este panel quedan registrados.</p>
+          <p className="text-slate-500 text-sm mb-6">Panel exclusivo para monitores autorizados.</p>
           <form onSubmit={handleLogin} className="space-y-4 text-left">
-            <div><label className="block text-xs font-bold text-slate-600 mb-1">Tu Nombre (Identificación)</label><input type="text" required value={adminName} onChange={(e) => setAdminName(e.target.value)} placeholder="Ej: David" className="w-full p-3 border border-slate-300 rounded focus:border-emerald-500 outline-none" /></div>
-            <div><label className="block text-xs font-bold text-slate-600 mb-1">Contraseña de la Comisión</label><input type="password" required value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} placeholder="••••••••" className={`w-full p-3 border rounded tracking-widest outline-none ${loginError ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-emerald-500'}`} />{loginError && <p className="text-red-500 text-xs font-bold mt-2">Contraseña incorrecta.</p>}</div>
-            <button type="submit" disabled={isLoggingIn} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 px-4 rounded mt-2">{isLoggingIn ? 'Comprobando...' : 'Entrar al Panel'}</button>
+            <div>
+              <label className="block text-xs font-bold text-slate-600 mb-1">Tu Nombre (Autorizado)</label>
+              <input 
+                type="text" 
+                required 
+                value={adminName} 
+                onChange={(e) => setAdminName(e.target.value)} 
+                placeholder="Ej: David" 
+                className="w-full p-3 border border-slate-300 rounded focus:border-emerald-500 outline-none" 
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-600 mb-1">Contraseña de la Comisión</label>
+              <input 
+                type="password" 
+                required 
+                value={passwordInput} 
+                onChange={(e) => setPasswordInput(e.target.value)} 
+                placeholder="••••••••" 
+                className={`w-full p-3 border rounded tracking-widest outline-none ${errorMessage ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-emerald-500'}`} 
+              />
+              {errorMessage && <p className="text-red-600 text-xs font-bold mt-2">{errorMessage}</p>}
+            </div>
+            <button type="submit" disabled={isLoggingIn} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 px-4 rounded mt-2">
+              {isLoggingIn ? 'Comprobando...' : 'Entrar al Panel'}
+            </button>
           </form>
           <div className="mt-6"><Link href="/" className="text-sm text-slate-400 hover:text-slate-600 underline">Volver a la tienda</Link></div>
         </div>
@@ -132,7 +230,7 @@ export default function AdminPage() {
         <div className="flex justify-between items-center mb-6">
           <div><h1 className="text-3xl font-bold text-slate-900">Panel de Administración</h1><p className="text-slate-500">Gestión de la Tienda Scout (Usuario: <strong className="text-emerald-700">{adminName}</strong>)</p></div>
           <div className="flex gap-4">
-            <button onClick={() => {setIsLoggedIn(false); setAdminName(''); setPasswordInput('');}} className="text-slate-500 hover:text-slate-800 font-bold px-4 py-2">Cerrar sesión</button>
+            <button onClick={() => {setIsLoggedIn(false); setAdminName(''); setPasswordInput(''); setErrorMessage('');}} className="text-slate-500 hover:text-slate-800 font-bold px-4 py-2">Cerrar sesión</button>
             <Link href="/" className="bg-slate-200 hover:bg-slate-300 text-slate-800 px-4 py-2 rounded font-semibold transition-colors">Volver a la tienda</Link>
           </div>
         </div>
@@ -175,7 +273,6 @@ export default function AdminPage() {
               {/* --- INVENTARIO --- */}
               {activeTab === 'inventory' && (
                 <div>
-                  {/* BARRA DE HERRAMIENTAS: Título, Buscador y Botón */}
                   <div className="p-4 border-b border-slate-200 bg-slate-50 flex flex-col sm:flex-row justify-between items-center gap-4">
                     <h3 className="font-bold text-slate-700 w-full sm:w-auto text-lg">Control de Stock</h3>
                     
@@ -183,7 +280,7 @@ export default function AdminPage() {
                       <span className="absolute left-3 top-2.5 text-slate-400">🔍</span>
                       <input 
                         type="text" 
-                        placeholder="Buscar nombre o talla..." 
+                        placeholder="Buscar nombre, talla o detalle..." 
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                         className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:border-emerald-500 shadow-sm transition-colors"
@@ -199,11 +296,7 @@ export default function AdminPage() {
                     <form onSubmit={handleAddNewProduct} className="p-6 bg-slate-100 border-b border-slate-200 flex flex-col gap-4">
                       <div>
                         <label className="block text-xs font-bold text-slate-600 mb-1">¿A qué producto pertenece?</label>
-                        <select 
-                          value={selectedProductId} 
-                          onChange={(e) => setSelectedProductId(e.target.value)}
-                          className="w-full p-3 bg-white border-2 border-slate-300 rounded-lg font-bold text-base outline-none focus:border-emerald-500 shadow-sm cursor-pointer transition-colors"
-                        >
+                        <select value={selectedProductId} onChange={(e) => setSelectedProductId(e.target.value)} className="w-full p-3 bg-white border-2 border-slate-300 rounded-lg font-bold text-base outline-none focus:border-emerald-500 shadow-sm cursor-pointer transition-colors">
                           <option value="new">✨ Crear producto completamente nuevo...</option>
                           {products.map(p => (
                             <option key={p.id} value={p.id}>{p.name} ({p.category})</option>
@@ -212,10 +305,22 @@ export default function AdminPage() {
                       </div>
 
                       {selectedProductId === 'new' && (
-                        <div className="flex gap-4">
-                          <div className="w-1/2"><label className="block text-xs font-bold text-slate-600 mb-1">Nombre del producto</label><input type="text" required value={newProduct.name} onChange={e => setNewProduct({...newProduct, name: e.target.value})} placeholder="Ej: Polo Scout" className="w-full p-2 border rounded text-sm" /></div>
-                          <div className="w-1/2"><label className="block text-xs font-bold text-slate-600 mb-1">Categoría</label><input type="text" required value={newProduct.category} onChange={e => setNewProduct({...newProduct, category: e.target.value})} placeholder="Ej: Ropa" className="w-full p-2 border rounded text-sm" /></div>
-                        </div>
+                        <>
+                          <div className="flex gap-4">
+                            <div className="w-1/2"><label className="block text-xs font-bold text-slate-600 mb-1">Nombre del producto</label><input type="text" required value={newProduct.name} onChange={e => setNewProduct({...newProduct, name: e.target.value})} placeholder="Ej: Polo Scout" className="w-full p-2 border rounded text-sm" /></div>
+                            <div className="w-1/2"><label className="block text-xs font-bold text-slate-600 mb-1">Categoría</label><input type="text" required value={newProduct.category} onChange={e => setNewProduct({...newProduct, category: e.target.value})} placeholder="Ej: Ropa" className="w-full p-2 border rounded text-sm" /></div>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-600 mb-1">Descripción corta (opcional)</label>
+                            <input 
+                              type="text" 
+                              value={newProduct.description} 
+                              onChange={e => setNewProduct({...newProduct, description: e.target.value})} 
+                              placeholder="Ej: 100% algodón, logo bordado en el pecho" 
+                              className="w-full p-2 border rounded text-sm" 
+                            />
+                          </div>
+                        </>
                       )}
 
                       <div className="grid grid-cols-3 gap-4 items-end">
@@ -235,30 +340,69 @@ export default function AdminPage() {
                       <tr><th className="p-4">Producto</th><th className="p-4">Categoría</th><th className="p-4 text-center">Talla</th><th className="p-4 text-right">Precio</th><th className="p-4 text-right">Stock</th><th className="p-4"></th></tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {/* NUEVO: Usamos filteredProducts en lugar de products */}
                       {filteredProducts.map((product) => (
                         product.product_variants.map((variant) => (
                           <tr key={variant.id} className="hover:bg-slate-50 transition-colors group">
-                            <td className="p-4 font-medium text-slate-900">{product.name}</td>
+                            <td className="p-4">
+                              <div className="font-medium text-slate-900">{product.name}</div>
+                              {product.description && (
+                                <div className="text-xs text-slate-400 font-normal mt-0.5">{product.description}</div>
+                              )}
+                            </td>
                             <td className="p-4"><span className="bg-slate-100 text-slate-700 text-xs px-2 py-1 rounded">{product.category}</span></td>
                             <td className="p-4 font-bold text-center text-slate-700">{variant.size}</td>
                             <td className="p-4 text-right text-slate-600">{variant.price.toFixed(2)} €</td>
                             <td className="p-4 text-right">
-                              <div className="flex items-center justify-end gap-2">
-                                <button onClick={() => handleStockChange(variant.id, variant.stock, -1)} className="bg-slate-200 hover:bg-slate-300 text-slate-700 w-7 h-7 rounded-full font-bold flex items-center justify-center transition-colors">-</button>
-                                <span className={`font-bold min-w-[30px] text-center ${variant.stock < 5 ? 'text-red-600' : 'text-emerald-700'}`}>{variant.stock}</span>
-                                <button onClick={() => handleStockChange(variant.id, variant.stock, 1)} className="bg-slate-200 hover:bg-slate-300 text-slate-700 w-7 h-7 rounded-full font-bold flex items-center justify-center transition-colors">+</button>
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button 
+                                  onClick={() => handleModifyStock(variant.id, variant.stock, 'remove')} 
+                                  className="bg-slate-100 hover:bg-red-50 hover:text-red-700 text-slate-600 border border-slate-200 px-2.5 py-1 rounded text-xs font-bold transition-colors"
+                                  title="Quitar varias unidades"
+                                >
+                                  ➖ Quitar
+                                </button>
+
+                                <button 
+                                  onClick={() => handleStockStep(variant.id, variant.stock, -1)} 
+                                  className="bg-slate-200 hover:bg-slate-300 text-slate-700 w-7 h-7 rounded-full font-bold flex items-center justify-center transition-colors text-sm"
+                                  title="Restar 1 unidad"
+                                >
+                                  -
+                                </button>
+                                
+                                <span className={`font-bold min-w-[32px] text-center text-sm ${variant.stock < 5 ? 'text-red-600' : 'text-emerald-700'}`}>
+                                  {variant.stock}
+                                </span>
+
+                                <button 
+                                  onClick={() => handleStockStep(variant.id, variant.stock, 1)} 
+                                  className="bg-slate-200 hover:bg-slate-300 text-slate-700 w-7 h-7 rounded-full font-bold flex items-center justify-center transition-colors text-sm"
+                                  title="Añadir 1 unidad"
+                                >
+                                  +
+                                </button>
+
+                                <button 
+                                  onClick={() => handleModifyStock(variant.id, variant.stock, 'add')} 
+                                  className="bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-600 border border-slate-200 px-2.5 py-1 rounded text-xs font-bold transition-colors"
+                                  title="Añadir varias unidades"
+                                >
+                                  ➕ Añadir
+                                </button>
                               </div>
                             </td>
                             <td className="p-4 text-center w-10">
-                              <button onClick={() => handleDeleteVariant(variant.id)} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-700 transition-all" title="Eliminar talla">
+                              <button 
+                                onClick={() => handleDeleteVariant(variant.id, product.id)} 
+                                className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-700 transition-all text-base cursor-pointer" 
+                                title="Eliminar talla"
+                              >
                                 🗑️
                               </button>
                             </td>
                           </tr>
                         ))
                       ))}
-                      {/* Mensaje si el buscador no encuentra nada */}
                       {filteredProducts.length === 0 && (
                         <tr><td colSpan={6} className="p-8 text-center text-slate-400">No hay productos que coincidan con la búsqueda.</td></tr>
                       )}
