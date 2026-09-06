@@ -29,7 +29,7 @@ const avisarPorTelegram = async (mensaje: string) => {
 
 // Tipos de datos
 interface Variant { id: string; size: string; price: number; stock: number; }
-interface Product { id: string; name: string; category: string; product_variants: Variant[]; }
+interface Product { id: string; name: string; description?: string;category: string; product_variants: Variant[]; }
 interface CartItem { variant_id: string; product_name: string; size: string; price: number; quantity: number; }
 
 export default function StoreClient({ products }: { products: Product[] }) {
@@ -189,6 +189,17 @@ export default function StoreClient({ products }: { products: Product[] }) {
           <div key={product.id} className="bg-white p-6 rounded-xl border shadow-sm">
             <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-1 rounded">{product.category}</span>
             <h2 className="text-xl font-bold text-slate-800 mt-2">{product.name}</h2>
+            {product.description && (
+              <details className="mt-2 text-sm text-slate-600 cursor-pointer group">
+                <summary className="font-semibold text-emerald-700 hover:text-emerald-800 outline-none list-none flex items-center gap-1 select-none">
+                  <span className="text-xs group-open:rotate-90 transition-transform duration-200">▶</span> 
+                  Ver descripción
+                </summary>
+                <p className="mt-2 mb-4 pl-3 border-l-2 border-emerald-300 text-slate-500 leading-relaxed">
+                  {product.description}
+                </p>
+              </details>
+)}
             <ul className="mt-4 divide-y divide-slate-100">
               {product.product_variants.map((variant) => (
                 <li key={variant.id} className="py-3 flex justify-between items-center">
