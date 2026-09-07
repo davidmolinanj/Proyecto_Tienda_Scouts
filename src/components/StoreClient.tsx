@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useRouter } from 'next/navigation';
 
@@ -19,12 +19,17 @@ interface CartItem { variant_id: string; product_name: string; size: string; pri
 export default function StoreClient({ products }: { products: Product[] }) {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [buyerName, setBuyerName] = useState('');
-  // CAMBIO: Por defecto seleccionamos "Manada" o dejamos vacío para obligar/facilitar
   const [scoutUnit, setScoutUnit] = useState('Manada');
   const [status, setStatus] = useState<'idle' | 'loading' | 'success'>('idle');
   
   const [activeDescription, setActiveDescription] = useState<Product | null>(null);
   const [selectedVariants, setSelectedVariants] = useState<{ [productId: string]: string }>({});
+  
+  // NUEVO: Estados para el mensaje flotante (Toast)
+  const [showToast, setShowToast] = useState(false);
+
+  // NUEVO: Referencia para hacer scroll suave hasta el carrito en móvil
+  const cartRef = useRef<HTMLDivElement>(null);
 
   const router = useRouter();
 
@@ -39,17 +44,13 @@ export default function StoreClient({ products }: { products: Product[] }) {
       const sizeA = a.size.toLowerCase().trim();
       const sizeB = b.size.toLowerCase().trim();
 
-      if (sizeOrder[sizeA] && sizeOrder[sizeB]) {
-        return sizeOrder[sizeA] - sizeOrder[sizeB];
-      }
+      if (sizeOrder[sizeA] && sizeOrder[sizeB]) return sizeOrder[sizeA] - sizeOrder[sizeB];
       if (sizeOrder[sizeA]) return -1;
       if (sizeOrder[sizeB]) return 1;
 
       const numA = parseFloat(sizeA);
       const numB = parseFloat(sizeB);
-      if (!isNaN(numA) && !isNaN(numB)) {
-        return numA - numB;
-      }
+      if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
 
       return sizeA.localeCompare(sizeB);
     });
@@ -73,6 +74,10 @@ export default function StoreClient({ products }: { products: Product[] }) {
       }
       return [...prev, { variant_id: variant.id, product_name: product.name, size: variant.size, price: variant.price, quantity: 1, max_stock: variant.stock }];
     });
+
+    // NUEVO: Mostrar el mensaje flotante verde 2 segundos
+    setShowToast(true);
+    setTimeout(() => { setShowToast(false); }, 2000);
   };
 
   const updateQuantity = (variant_id: string, delta: number) => {
@@ -90,7 +95,11 @@ export default function StoreClient({ products }: { products: Product[] }) {
   };
 
   const removeFromCart = (variant_id: string) => setCart((prev) => prev.filter((item) => item.variant_id !== variant_id));
+  
   const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  
+  // NUEVO: Calcular cuántos artículos totales hay en la cesta (para el globito rojo)
+  const totalItems = cart.reduce((sum, item) => sum + item.quantity, 0);
 
   const handleCheckout = async () => {
     if (!buyerName.trim()) { alert('Por favor, introduce tu nombre para el pedido.'); return; }
@@ -120,6 +129,11 @@ export default function StoreClient({ products }: { products: Product[] }) {
     setStatus('success'); setCart([]); router.refresh();
   };
 
+  // Función para hacer scroll al carrito en móviles
+  const scrollToCart = () => {
+    cartRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
   if (status === 'success') {
     return (
       <div className="bg-white shadow-sm border border-slate-200/80 p-12 rounded-2xl text-center max-w-xl mx-auto my-12">
@@ -135,6 +149,27 @@ export default function StoreClient({ products }: { products: Product[] }) {
   return (
     <div className="flex flex-col lg:flex-row gap-8 items-start relative">
       
+      {/* NUEVO: Mensaje Flotante de confirmación (Toast) */}
+      <div className={`fixed top-6 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 ${showToast ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
+        <div className="bg-emerald-600 text-white font-bold text-sm px-6 py-3 rounded-full shadow-xl flex items-center gap-2">
+          <span>✅</span> Añadido a la cesta
+        </div>
+      </div>
+
+      {/* NUEVO: Botón Flotante para Móviles (Solo se ve en móvil y si hay algo en el carrito) */}
+      {totalItems > 0 && (
+        <button 
+          onClick={scrollToCart}
+          className="lg:hidden fixed bottom-6 right-6 bg-purple-700 hover:bg-purple-800 text-white p-4 rounded-full shadow-2xl z-40 transition-transform active:scale-95 flex items-center justify-center border-4 border-white"
+          style={{ width: '64px', height: '64px' }}
+        >
+          <span className="text-2xl">🛒</span>
+          <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs font-black w-6 h-6 flex items-center justify-center rounded-full border-2 border-white shadow-sm">
+            {totalItems}
+          </span>
+        </button>
+      )}
+
       {/* REJILLA DE PRODUCTOS CON FLEXBOX CENTRADO */}
       <div className="flex-1 flex flex-wrap justify-center gap-6">
         {products.map((product) => {
@@ -147,7 +182,6 @@ export default function StoreClient({ products }: { products: Product[] }) {
           return (
             <div key={product.id} className="bg-white rounded-2xl shadow-sm hover:shadow-md transition-all duration-300 overflow-hidden border border-slate-200/70 flex flex-col w-full sm:w-[calc(50%-12px)] lg:w-[calc(33.333%-16px)] max-w-sm">
               
-              {/* Imagen limpia */}
               <div className="w-full h-52 bg-slate-50/50 flex items-center justify-center p-6 relative border-b border-slate-100">
                 {product.image_url ? (
                   <img src={product.image_url} alt={product.name} className="max-w-full max-h-full object-contain hover:scale-105 transition-transform duration-300" />
@@ -171,7 +205,6 @@ export default function StoreClient({ products }: { products: Product[] }) {
                   </div>
                 </div>
 
-                {/* BLOQUE INFERIOR */}
                 <div className="mt-6 pt-4 border-t border-slate-100 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex-1 mr-3">
@@ -220,10 +253,11 @@ export default function StoreClient({ products }: { products: Product[] }) {
       </div>
 
       {/* CARRITO A LA DERECHA */}
-      <div className="w-full lg:w-[360px] lg:sticky lg:top-6 bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80 shrink-0">
+      {/* NUEVO: Le hemos puesto el ref={cartRef} aquí para que el móvil sepa a dónde bajar */}
+      <div ref={cartRef} className="w-full lg:w-[360px] lg:sticky lg:top-6 bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80 shrink-0">
         <h3 className="text-base font-bold text-slate-900 border-b border-slate-100 pb-3 mb-4 flex items-center justify-between">
           <span>🛒 Tu Pedido</span>
-          <span className="text-xs font-semibold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full">{cart.length} ítems</span>
+          <span className="text-xs font-semibold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full">{totalItems} ítems</span>
         </h3>
         
         {cart.length === 0 ? (
@@ -262,7 +296,6 @@ export default function StoreClient({ products }: { products: Product[] }) {
                 <input type="text" value={buyerName} onChange={(e) => setBuyerName(e.target.value)} className="w-full border border-slate-200 p-2.5 rounded-xl text-xs outline-none focus:border-purple-600 transition-colors bg-slate-50/50" placeholder="Ej: Baloo" />
               </div>
               
-              {/* CAMBIO: Selector desplegable para las Ramas en lugar de texto libre */}
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Rama</label>
                 <select 

@@ -9,6 +9,9 @@ interface Product { id: string; name: string; description: string; image_url: st
 interface Order { id: string; buyer_name: string; scout_unit: string; total_amount: number; status: string; created_at: string; }
 
 export default function AdminPage() {
+  // Estado para la caja inicial que se guarda en Supabase
+  const [cajaInicial, setCajaInicial] = useState<number>(0);
+
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [adminName, setAdminName] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
@@ -30,10 +33,24 @@ export default function AdminPage() {
 
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
 
+  // CÁLCULO MATEMÁTICO DE LA CAJA EN TIEMPO REAL
+  const totalCobrado = orders
+    .filter(o => o.status === 'Pagado' || o.status === 'Entregado')
+    .reduce((sum, order) => sum + order.total_amount, 0);
+  
+  const cajaTotal = cajaInicial + totalCobrado;
+
   useEffect(() => { if (isLoggedIn) fetchData(); }, [isLoggedIn]);
 
   async function fetchData() {
     setLoading(true);
+    
+    // Traemos la configuración de la caja desde Supabase
+    const { data: configData } = await supabase.from('configuracion').select('caja_inicial').eq('id', 1).maybeSingle();
+    if (configData) {
+      setCajaInicial(configData.caja_inicial || 0);
+    }
+
     const { data: invData } = await supabase.from('products').select(`id, name, description, image_url, category, min_stock_alert, product_variants (id, size, price, stock)`).order('name');
     if (invData) {
       const productosActivos = (invData as Product[]).filter(p => p.product_variants.length > 0);
@@ -74,6 +91,22 @@ export default function AdminPage() {
     setIsLoggingIn(false);
   };
 
+  // Función para cambiar la caja inicial desde la interfaz (Para el futuro)
+  const handleEditCaja = async () => {
+    const input = window.prompt(`Dinero base actual: ${cajaInicial} €\n\n¿Cuánto dinero hay de base en la caja metálica al empezar esta ronda?\n(Usa un punto para los céntimos, ej: 50.50)`);
+    if (input === null || input.trim() === '') return;
+    
+    const parsed = parseFloat(input);
+    if (isNaN(parsed) || parsed < 0) {
+      alert("Por favor, introduce un número válido.");
+      return;
+    }
+
+    setCajaInicial(parsed);
+    // Guarda o actualiza (upsert) la fila con id=1 en la base de datos
+    await supabase.from('configuracion').upsert({ id: 1, caja_inicial: parsed });
+  };
+
   const handleStatusChange = async (orderId: string, newStatus: string) => {
     setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: newStatus } : o));
     await supabase.from('orders').update({ status: newStatus }).eq('id', orderId);
@@ -98,7 +131,6 @@ export default function AdminPage() {
     }
   };
 
-  // Función exclusiva para Poner / Quitar stock
   const handleBulkChange = async (variantId: string, currentStock: number, type: 'add' | 'subtract') => {
     const actionText = type === 'add' ? 'PONER' : 'QUITAR';
     const input = window.prompt(`Stock actual: ${currentStock} uds.\n\n¿Cuántas unidades quieres ${actionText} de golpe?\n(Pon solo el número de unidades, ej: 5)`);
@@ -118,11 +150,20 @@ export default function AdminPage() {
     await supabase.from('product_variants').update({ stock: newStock }).eq('id', variantId);
   };
 
-  const handleDeleteVariant = async (variantId: string) => {
+  const handleDeleteVariant = async (variantId: string, productId: string) => {
     if (!window.confirm("¿Seguro que quieres eliminar esta talla/producto?")) return;
+    
     const { error } = await supabase.from('product_variants').delete().eq('id', variantId);
-    if (error) alert("⚠️ No puedes borrar este artículo porque hay pedidos asociados. Pon el stock a 0.");
-    else fetchData(); 
+    
+    if (error) {
+      alert("⚠️ No puedes borrar este artículo porque hay pedidos asociados. Pon el stock a 0.");
+    } else {
+      const productoAfectado = products.find(p => p.id === productId);
+      if (productoAfectado && productoAfectado.product_variants.length === 1) {
+        await supabase.from('products').delete().eq('id', productId);
+      }
+      fetchData(); 
+    }
   };
 
   const handleAddNewProduct = async (e: React.FormEvent) => {
@@ -247,20 +288,36 @@ export default function AdminPage() {
               {/* --- TABLA DE PEDIDOS --- */}
               {activeTab === 'orders' && (
                 <div>
-                  <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row justify-between items-center gap-4">
-                    <div className="flex items-center gap-3 w-full sm:w-auto">
-                      <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Acciones masivas:</span>
+                  <div className="p-5 border-b border-slate-100 bg-slate-50 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                    
+                    {/* 💰 WIDGET DE CAJA MEJORADO CON BOTÓN DE EDICIÓN */}
+                    <div className="bg-white border border-emerald-200 px-4 py-3 rounded-xl shadow-sm flex items-center gap-4 w-full md:w-auto">
+                      <div className="w-10 h-10 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center text-lg">💶</div>
+                      <div>
+                        <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Dinero Total en Caja</p>
+                        <p className="text-xl font-black text-emerald-600 leading-none mt-0.5">{cajaTotal.toFixed(2)} €</p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <p className="text-[10px] font-semibold text-slate-400">Base ({cajaInicial.toFixed(2)}€) + Ventas ({totalCobrado.toFixed(2)}€)</p>
+                          <button onClick={handleEditCaja} className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded text-[9px] uppercase font-bold transition-colors">
+                            ✏️ Editar base
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* ACCIONES MASIVAS */}
+                    <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
                       {selectedOrders.length > 0 && (
-                        <button onClick={() => handleDeleteOrders(selectedOrders)} className="bg-red-600 hover:bg-red-700 text-white text-xs px-3.5 py-2 rounded-xl font-bold shadow-xs transition-colors flex items-center gap-1.5">
+                        <button onClick={() => handleDeleteOrders(selectedOrders)} className="w-full sm:w-auto bg-red-600 hover:bg-red-700 text-white text-xs px-4 py-2.5 rounded-xl font-bold shadow-xs transition-colors flex items-center justify-center gap-1.5">
                           <span>🗑️</span> Borrar seleccionados ({selectedOrders.length})
                         </button>
                       )}
+                      {orders.length > 0 && (
+                        <button onClick={handleDeleteAllOrders} className="w-full sm:w-auto bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 px-4 py-2.5 rounded-xl text-xs font-bold transition-colors">
+                          ⚠️ Borrar todo el historial
+                        </button>
+                      )}
                     </div>
-                    {orders.length > 0 && (
-                      <button onClick={handleDeleteAllOrders} className="w-full sm:w-auto bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 px-4 py-2 rounded-xl text-xs font-bold transition-colors">
-                        ⚠️ Borrar todo el historial de pedidos
-                      </button>
-                    )}
                   </div>
 
                   <div className="overflow-x-auto">
@@ -387,30 +444,24 @@ export default function AdminPage() {
                               <td className="p-4 font-semibold text-right text-slate-600">{variant.price.toFixed(2)} €</td>
                               <td className="p-4 text-right">
                                 
-                                {/* AQUÍ ESTÁN LOS 2 BOTONES PRINCIPALES */}
                                 <div className="flex items-center justify-end gap-3">
-                                  
-                                  {/* Botón: Quitar */}
                                   <button onClick={() => handleBulkChange(variant.id, variant.stock, 'subtract')} className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs" title="Restar stock">
                                     Quitar
                                   </button>
 
-                                  {/* Número actual de stock */}
                                   <span className={`font-bold min-w-[32px] text-center text-sm ${variant.stock < (product.min_stock_alert || 5) ? 'text-red-600' : 'text-slate-800'}`}>
                                     {variant.stock}
                                   </span>
                                   
-                                  {/* Botón: Poner */}
                                   <button onClick={() => handleBulkChange(variant.id, variant.stock, 'add')} className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs" title="Añadir stock">
                                     Poner
                                   </button>
-
                                 </div>
 
                               </td>
                               <td className="p-4 text-center w-24 whitespace-nowrap">
                                 <button onClick={() => setEditingItem({ productId: product.id, variantId: variant.id, name: product.name, category: product.category, description: product.description || '', image_url: product.image_url || '', min_stock_alert: product.min_stock_alert ?? 5, size: variant.size, price: variant.price })} className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-purple-600 transition-all mr-3 text-sm" title="Editar">✏️</button>
-                                <button onClick={() => handleDeleteVariant(variant.id)} className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-600 transition-all text-sm" title="Eliminar">🗑️</button>
+                                <button onClick={() => handleDeleteVariant(variant.id, product.id)} className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-600 transition-all text-sm" title="Eliminar">🗑️</button>
                               </td>
                             </tr>
                           ))
