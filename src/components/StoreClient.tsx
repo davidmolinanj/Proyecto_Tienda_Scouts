@@ -25,10 +25,7 @@ export default function StoreClient({ products }: { products: Product[] }) {
   const [activeDescription, setActiveDescription] = useState<Product | null>(null);
   const [selectedVariants, setSelectedVariants] = useState<{ [productId: string]: string }>({});
   
-  // NUEVO: Estados para el mensaje flotante (Toast)
   const [showToast, setShowToast] = useState(false);
-
-  // NUEVO: Referencia para hacer scroll suave hasta el carrito en móvil
   const cartRef = useRef<HTMLDivElement>(null);
 
   const router = useRouter();
@@ -62,7 +59,10 @@ export default function StoreClient({ products }: { products: Product[] }) {
 
   const addToCart = (product: Product) => {
     const sortedVars = sortVariants(product.product_variants);
-    const defaultVariantId = selectedVariants[product.id] || sortedVars[0]?.id;
+    // NUEVO: Busca la primera variante que tenga stock para usarla por defecto
+    const firstAvailable = sortedVars.find(v => v.stock > 0) || sortedVars[0];
+    const defaultVariantId = selectedVariants[product.id] || firstAvailable?.id;
+    
     const variant = sortedVars.find(v => v.id === defaultVariantId);
     if (!variant || variant.stock === 0) return;
 
@@ -75,7 +75,6 @@ export default function StoreClient({ products }: { products: Product[] }) {
       return [...prev, { variant_id: variant.id, product_name: product.name, size: variant.size, price: variant.price, quantity: 1, max_stock: variant.stock }];
     });
 
-    // NUEVO: Mostrar el mensaje flotante verde 2 segundos
     setShowToast(true);
     setTimeout(() => { setShowToast(false); }, 2000);
   };
@@ -97,8 +96,6 @@ export default function StoreClient({ products }: { products: Product[] }) {
   const removeFromCart = (variant_id: string) => setCart((prev) => prev.filter((item) => item.variant_id !== variant_id));
   
   const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  
-  // NUEVO: Calcular cuántos artículos totales hay en la cesta (para el globito rojo)
   const totalItems = cart.reduce((sum, item) => sum + item.quantity, 0);
 
   const handleCheckout = async () => {
@@ -129,7 +126,6 @@ export default function StoreClient({ products }: { products: Product[] }) {
     setStatus('success'); setCart([]); router.refresh();
   };
 
-  // Función para hacer scroll al carrito en móviles
   const scrollToCart = () => {
     cartRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -149,14 +145,14 @@ export default function StoreClient({ products }: { products: Product[] }) {
   return (
     <div className="flex flex-col lg:flex-row gap-8 items-start relative">
       
-      {/* NUEVO: Mensaje Flotante de confirmación (Toast) */}
+      {/* Mensaje Flotante (Toast) */}
       <div className={`fixed top-6 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 ${showToast ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
         <div className="bg-emerald-600 text-white font-bold text-sm px-6 py-3 rounded-full shadow-xl flex items-center gap-2">
           <span>✅</span> Añadido a la cesta
         </div>
       </div>
 
-      {/* NUEVO: Botón Flotante para Móviles (Solo se ve en móvil y si hay algo en el carrito) */}
+      {/* Botón Flotante para Móviles */}
       {totalItems > 0 && (
         <button 
           onClick={scrollToCart}
@@ -170,12 +166,15 @@ export default function StoreClient({ products }: { products: Product[] }) {
         </button>
       )}
 
-      {/* REJILLA DE PRODUCTOS CON FLEXBOX CENTRADO */}
+      {/* REJILLA DE PRODUCTOS */}
       <div className="flex-1 flex flex-wrap justify-center gap-6">
         {products.map((product) => {
           const sortedVariants = sortVariants(product.product_variants);
-          const currentVariantId = selectedVariants[product.id] || sortedVariants[0]?.id;
-          const selectedVariant = sortedVariants.find(v => v.id === currentVariantId) || sortedVariants[0];
+          
+          // NUEVO: Calculamos la primera variante disponible para ponerla por defecto
+          const firstAvailable = sortedVariants.find(v => v.stock > 0) || sortedVariants[0];
+          const currentVariantId = selectedVariants[product.id] || firstAvailable?.id;
+          const selectedVariant = sortedVariants.find(v => v.id === currentVariantId) || firstAvailable;
           
           const hasMultipleVariants = sortedVariants.length > 1;
 
@@ -226,7 +225,7 @@ export default function StoreClient({ products }: { products: Product[] }) {
                         <>
                           <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Talla / Modelo</label>
                           <div className="text-xs font-bold text-slate-800 py-2">
-                            {selectedVariant.size} <span className="font-normal text-slate-400">({selectedVariant.stock} disp.)</span>
+                            {selectedVariant?.size} <span className="font-normal text-slate-400">({selectedVariant?.stock} disp.)</span>
                           </div>
                         </>
                       )}
@@ -253,7 +252,6 @@ export default function StoreClient({ products }: { products: Product[] }) {
       </div>
 
       {/* CARRITO A LA DERECHA */}
-      {/* NUEVO: Le hemos puesto el ref={cartRef} aquí para que el móvil sepa a dónde bajar */}
       <div ref={cartRef} className="w-full lg:w-[360px] lg:sticky lg:top-6 bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80 shrink-0">
         <h3 className="text-base font-bold text-slate-900 border-b border-slate-100 pb-3 mb-4 flex items-center justify-between">
           <span>🛒 Tu Pedido</span>

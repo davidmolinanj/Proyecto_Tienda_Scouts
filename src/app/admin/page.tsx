@@ -9,7 +9,7 @@ interface Product { id: string; name: string; description: string; image_url: st
 interface Order { id: string; buyer_name: string; scout_unit: string; total_amount: number; status: string; created_at: string; }
 
 export default function AdminPage() {
-  // Estado para la caja inicial que se guarda en Supabase
+  // Estado para la caja inicial/ajustes que se guarda en Supabase
   const [cajaInicial, setCajaInicial] = useState<number>(0);
 
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -91,20 +91,36 @@ export default function AdminPage() {
     setIsLoggingIn(false);
   };
 
-  // Función para cambiar la caja inicial desde la interfaz (Para el futuro)
+  // Función para cambiar la caja inicial desde la interfaz
   const handleEditCaja = async () => {
-    const input = window.prompt(`Dinero base actual: ${cajaInicial} €\n\n¿Cuánto dinero hay de base en la caja metálica al empezar esta ronda?\n(Usa un punto para los céntimos, ej: 50.50)`);
+    const input = window.prompt(`Base actual (sin contar ventas): ${cajaInicial.toFixed(2)} €\n\n¿Cuánto dinero quieres fijar como base o ajuste inicial?\n(Usa un punto para los céntimos, ej: 50.50)`);
     if (input === null || input.trim() === '') return;
     
     const parsed = parseFloat(input);
-    if (isNaN(parsed) || parsed < 0) {
+    if (isNaN(parsed)) {
       alert("Por favor, introduce un número válido.");
       return;
     }
 
     setCajaInicial(parsed);
-    // Guarda o actualiza (upsert) la fila con id=1 en la base de datos
     await supabase.from('configuracion').upsert({ id: 1, caja_inicial: parsed });
+  };
+
+  // NUEVO: Función para registrar un gasto y restarlo de la caja
+  const handleRestarCaja = async () => {
+    const input = window.prompt(`Dinero Total en la caja ahora mismo: ${cajaTotal.toFixed(2)} €\n\n¿Cuánto dinero vas a SACAR para comprar material (tiendas, pintura, etc)?\n(Usa un punto para céntimos, ej: 45.50)`);
+    if (input === null || input.trim() === '') return;
+    
+    const parsed = parseFloat(input);
+    if (isNaN(parsed) || parsed <= 0) {
+      alert("Por favor, introduce un número válido mayor que 0.");
+      return;
+    }
+
+    // Al sacar dinero, se lo restamos al fondo base para que las matemáticas cuadren
+    const nuevaCajaInicial = cajaInicial - parsed;
+    setCajaInicial(nuevaCajaInicial);
+    await supabase.from('configuracion').upsert({ id: 1, caja_inicial: nuevaCajaInicial });
   };
 
   const handleStatusChange = async (orderId: string, newStatus: string) => {
@@ -129,6 +145,13 @@ export default function AdminPage() {
       const { error } = await supabase.from('orders').delete().in('id', allIds);
       if (!error) { setSelectedOrders([]); fetchData(); alert("¡Historial limpiado con éxito!"); }
     }
+  };
+
+  const handleStockChange = async (variantId: string, currentStock: number, increment: number) => {
+    const newStock = Math.max(0, currentStock + increment);
+    if (newStock === currentStock) return;
+    setProducts(prev => prev.map(p => ({ ...p, product_variants: p.product_variants.map(v => v.id === variantId ? { ...v, stock: newStock } : v) })));
+    await supabase.from('product_variants').update({ stock: newStock }).eq('id', variantId);
   };
 
   const handleBulkChange = async (variantId: string, currentStock: number, type: 'add' | 'subtract') => {
@@ -290,16 +313,20 @@ export default function AdminPage() {
                 <div>
                   <div className="p-5 border-b border-slate-100 bg-slate-50 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                     
-                    {/* 💰 WIDGET DE CAJA MEJORADO CON BOTÓN DE EDICIÓN */}
+                    {/* 💰 WIDGET DE CAJA CON BOTÓN PARA SACAR DINERO */}
                     <div className="bg-white border border-emerald-200 px-4 py-3 rounded-xl shadow-sm flex items-center gap-4 w-full md:w-auto">
                       <div className="w-10 h-10 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center text-lg">💶</div>
                       <div>
                         <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Dinero Total en Caja</p>
                         <p className="text-xl font-black text-emerald-600 leading-none mt-0.5">{cajaTotal.toFixed(2)} €</p>
                         <div className="flex items-center gap-2 mt-1">
-                          <p className="text-[10px] font-semibold text-slate-400">Base ({cajaInicial.toFixed(2)}€) + Ventas ({totalCobrado.toFixed(2)}€)</p>
+                          <p className="text-[10px] font-semibold text-slate-400">Fondo ({cajaInicial.toFixed(2)}€) + Ventas ({totalCobrado.toFixed(2)}€)</p>
                           <button onClick={handleEditCaja} className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded text-[9px] uppercase font-bold transition-colors">
-                            ✏️ Editar base
+                            ✏️ Ajustar fondo
+                          </button>
+                          {/* NUEVO BOTON PARA GASTOS */}
+                          <button onClick={handleRestarCaja} className="bg-red-50 hover:bg-red-100 text-red-600 px-1.5 py-0.5 rounded text-[9px] uppercase font-bold transition-colors">
+                            ➖ Extraer dinero
                           </button>
                         </div>
                       </div>
@@ -412,7 +439,8 @@ export default function AdminPage() {
 
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end pt-2">
                         <div><label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Talla / Variante</label><input type="text" required value={newProduct.size} onChange={e => setNewProduct({...newProduct, size: e.target.value})} className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs" /></div>
-                        <div><label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Precio (€)</label><input type="number" step="0.50" required value={newProduct.price} onChange={e => setNewProduct({...newProduct, price: parseFloat(e.target.value)})} className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs" /></div>
+                        <div><label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Precio (€)</label><input type="number" step="0.50" required value={newProduct.price} onChange={e => setNewProduct({...newProduct, price: parseFloat(e.target.value)}
+                        )} className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs" /></div>
                         <div><label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Stock Inicial</label><input type="number" required value={newProduct.stock} onChange={e => setNewProduct({...newProduct, stock: parseInt(e.target.value)})} className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs" /></div>
                       </div>
 
@@ -444,16 +472,25 @@ export default function AdminPage() {
                               <td className="p-4 font-semibold text-right text-slate-600">{variant.price.toFixed(2)} €</td>
                               <td className="p-4 text-right">
                                 
-                                <div className="flex items-center justify-end gap-3">
-                                  <button onClick={() => handleBulkChange(variant.id, variant.stock, 'subtract')} className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs" title="Restar stock">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  
+                                  <button onClick={() => handleBulkChange(variant.id, variant.stock, 'subtract')} className="bg-red-50 hover:bg-red-100 text-red-600 px-2 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs" title="Quitar stock de golpe">
                                     Quitar
                                   </button>
 
-                                  <span className={`font-bold min-w-[32px] text-center text-sm ${variant.stock < (product.min_stock_alert || 5) ? 'text-red-600' : 'text-slate-800'}`}>
+                                  <button onClick={() => handleStockChange(variant.id, variant.stock, -1)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 w-7 h-7 rounded-lg font-bold flex items-center justify-center transition-colors shadow-xs" title="Restar 1">
+                                    -
+                                  </button>
+
+                                  <span className={`font-bold min-w-[28px] text-center text-sm ${variant.stock < (product.min_stock_alert || 5) ? 'text-red-600' : 'text-slate-800'}`}>
                                     {variant.stock}
                                   </span>
                                   
-                                  <button onClick={() => handleBulkChange(variant.id, variant.stock, 'add')} className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs" title="Añadir stock">
+                                  <button onClick={() => handleStockChange(variant.id, variant.stock, 1)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 w-7 h-7 rounded-lg font-bold flex items-center justify-center transition-colors shadow-xs" title="Sumar 1">
+                                    +
+                                  </button>
+
+                                  <button onClick={() => handleBulkChange(variant.id, variant.stock, 'add')} className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-2 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs" title="Añadir stock de golpe">
                                     Poner
                                   </button>
                                 </div>
