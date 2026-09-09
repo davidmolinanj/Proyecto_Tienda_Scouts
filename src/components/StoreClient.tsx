@@ -59,7 +59,7 @@ export default function StoreClient({ products }: { products: Product[] }) {
 
   const addToCart = (product: Product) => {
     const sortedVars = sortVariants(product.product_variants);
-    // NUEVO: Busca la primera variante que tenga stock para usarla por defecto
+    // Busca la primera variante que tenga stock para usarla por defecto
     const firstAvailable = sortedVars.find(v => v.stock > 0) || sortedVars[0];
     const defaultVariantId = selectedVariants[product.id] || firstAvailable?.id;
     
@@ -122,7 +122,11 @@ export default function StoreClient({ products }: { products: Product[] }) {
         }
       }
     }
-    await avisarPorTelegram(`✅ Nuevo pedido de ${buyerName} (Rama: ${scoutUnit}): ${total} €`);
+    
+    // AQUÍ ESTÁ EL CAMBIO PARA ENVIAR EL RESUMEN POR TELEGRAM
+    const resumenPedido = cart.map(item => `🔹 ${item.quantity}x ${item.product_name} (Talla: ${item.size})`).join('\n');
+    await avisarPorTelegram(`✅ Nuevo pedido de ${buyerName} (Rama: ${scoutUnit}): ${total.toFixed(2)} €\n\n📝 Lista de artículos:\n${resumenPedido}`);
+    
     setStatus('success'); setCart([]); router.refresh();
   };
 
@@ -171,7 +175,7 @@ export default function StoreClient({ products }: { products: Product[] }) {
         {products.map((product) => {
           const sortedVariants = sortVariants(product.product_variants);
           
-          // NUEVO: Calculamos la primera variante disponible para ponerla por defecto
+          // Calculamos la primera variante disponible para ponerla por defecto
           const firstAvailable = sortedVariants.find(v => v.stock > 0) || sortedVariants[0];
           const currentVariantId = selectedVariants[product.id] || firstAvailable?.id;
           const selectedVariant = sortedVariants.find(v => v.id === currentVariantId) || firstAvailable;
