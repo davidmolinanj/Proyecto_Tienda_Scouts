@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 // 👇 AQUÍ PONES LOS NOMBRES PERMITIDOS (en minúsculas)
-const USUARIOS_PERMITIDOS = ['david', 'jose', 'marta', 'laura']; 
+const USUARIOS_PERMITIDOS = ['david', 'claudia', 'marta', 'eva', 'pablo']; 
 
 export async function POST(request: Request) {
   try {
