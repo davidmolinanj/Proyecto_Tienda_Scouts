@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase';
 import StoreClient from '../components/StoreClient';
+import WelcomeModal from '../components/WelcomeModal'; // IMPORTAMOS EL POPUP
 
 export const dynamic = 'force-dynamic'; 
 
@@ -17,8 +18,12 @@ async function getProducts(): Promise<Product[]> {
 
 export default async function HomePage() {
   const products = await getProducts();
+  
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
+      
+      {/* AQUÍ INYECTAMOS LA VENTANA EMERGENTE */}
+      <WelcomeModal />
       
       {/* BARRA SUPERIOR MINIMALISTA CON DETALLE DE COLOR SCOUT */}
       <div className="w-full h-1.5 bg-gradient-to-r from-green-600 via-purple-600 to-slate-300"></div>
