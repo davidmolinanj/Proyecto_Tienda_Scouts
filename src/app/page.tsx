@@ -13,7 +13,31 @@ async function getProducts(): Promise<Product[]> {
     .select('id, name, description, image_url, category, product_variants(id, size, price, stock)');
 
   if (error) { console.error('Error al cargar productos:', error.message); return []; }
-  return (data as Product[]).filter(producto => producto.product_variants.length > 0);
+  
+  const filteredData = (data as Product[]).filter(producto => producto.product_variants.length > 0);
+
+  // Orden jerárquico actualizado con las palabras exactas (en singular para que abarque más)
+  const categoryOrder = ['ropa', 'cuaderno', 'material', 'accesorio'];
+
+  const sortedData = filteredData.sort((a, b) => {
+    const catA = a.category.toLowerCase();
+    const catB = b.category.toLowerCase();
+
+    const indexA = categoryOrder.findIndex(cat => catA.includes(cat));
+    const indexB = categoryOrder.findIndex(cat => catB.includes(cat));
+
+    const posA = indexA === -1 ? 999 : indexA;
+    const posB = indexB === -1 ? 999 : indexB;
+
+    // 1º: Ordenamos por la jerarquía que hemos marcado arriba
+    if (posA !== posB) {
+      return posA - posB;
+    }
+    // 2º: Si están en la misma posición (o ambos son de otras categorías), los agrupamos por nombre de categoría para que no se mezclen
+    return catA.localeCompare(catB);
+  });
+
+  return sortedData;
 }
 
 export default async function HomePage() {

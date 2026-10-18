@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '../../lib/supabase';
 import Link from 'next/link';
 
@@ -10,6 +10,7 @@ interface Variant {
   price: number;
   stock: number;
   product_id?: string;
+  min_stock_alert?: number; // Añadido para controlar el stock por talla
 }
 
 interface Product {
@@ -23,10 +24,12 @@ interface Product {
 }
 
 interface OrderItem {
+  item_id: string;
   variant_id: string;
   quantity: number;
   product_name?: string;
   size?: string;
+  price?: number;
 }
 
 interface Order {
@@ -93,6 +96,7 @@ export default function AdminPage() {
     price: number;
   } | null>(null);
 
+  const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
 
   const totalCobrado = orders
@@ -105,6 +109,23 @@ export default function AdminPage() {
     new Set(['Ropa', 'Insignias', 'Libros', 'Material', 'Otros', ...products.map((p) => p.category)])
   );
 
+  // CÁLCULO DEL TOP VENTAS AUTOMÁTICO (Top 10 para que quepan varias tallas)
+  const topSellers = useMemo(() => {
+    const counts: Record<string, number> = {};
+    orders.forEach(order => {
+      order.order_items?.forEach(item => {
+        if (item.product_name && item.product_name !== 'Artículo no encontrado') {
+          // Ahora añadimos la talla al nombre para diferenciarlas
+          const nameWithSize = `${item.product_name} (Talla: ${item.size || '-'})`;
+          counts[nameWithSize] = (counts[nameWithSize] || 0) + item.quantity;
+        }
+      });
+    });
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+  }, [orders]);
+
   useEffect(() => {
     if (isLoggedIn) fetchData();
   }, [isLoggedIn]);
@@ -112,6 +133,12 @@ export default function AdminPage() {
   async function fetchData() {
     setLoading(true);
     try {
+      try {
+        await fetch('/api/cron');
+      } catch (e) {
+        console.log('El robot de limpieza no respondió', e);
+      }
+
       let caja = 0;
       let productosPlano: any[] = [];
       let variantesPlano: any[] = [];
@@ -136,10 +163,7 @@ export default function AdminPage() {
       const { data: iData } = await supabase.from('order_items').select('*');
       if (iData) itemsPlano = iData;
 
-      const { data: oData } = await supabase
-        .from('orders')
-        .select('*')
-        .order('created_at', { ascending: false });
+      const { data: oData } = await supabase.from('orders').select('*');
       if (oData) pedidosPlano = oData;
 
       const inventarioCompleto = productosPlano.map((p) => {
@@ -176,16 +200,24 @@ export default function AdminPage() {
             : null;
 
           return {
+            item_id: item.id,
             variant_id: idVarianteBuscada,
             quantity: item.quantity || item.cantidad || 1,
             product_name: productoReal ? productoReal.name : 'Artículo no encontrado',
-            size: variante ? variante.size : '-'
+            size: variante ? variante.size : '-',
+            price: variante ? variante.price : 0
           };
         });
         return { ...pedido, order_items };
       });
 
-      setOrders(pedidosCompletos as Order[]);
+      const pedidosOrdenados = pedidosCompletos.sort((a, b) => {
+        if (a.status === 'Entregado' && b.status !== 'Entregado') return 1;
+        if (a.status !== 'Entregado' && b.status === 'Entregado') return -1;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+
+      setOrders(pedidosOrdenados as Order[]);
     } catch (e) {
       console.error('Error crítico cargando base de datos:', e);
     }
@@ -328,6 +360,35 @@ export default function AdminPage() {
     }
   };
 
+  const handleRemoveItemFromOrder = async (order: Order, itemToRemove: OrderItem) => {
+    if (!window.confirm(`¿Seguro que quieres quitar ${itemToRemove.quantity}x ${itemToRemove.product_name} del pedido?\nSe devolverá automáticamente al inventario.`)) return;
+
+    setIsUploading(true);
+    await supabase.from('order_items').delete().eq('id', itemToRemove.item_id);
+
+    const { data: vData } = await supabase.from('product_variants').select('stock').eq('id', itemToRemove.variant_id).single();
+    if (vData) {
+      await supabase.from('product_variants').update({ stock: vData.stock + itemToRemove.quantity }).eq('id', itemToRemove.variant_id);
+    }
+
+    const newTotal = order.total_amount - ((itemToRemove.price || 0) * itemToRemove.quantity);
+    
+    if (newTotal <= 0) {
+      await supabase.from('orders').delete().eq('id', order.id);
+      setEditingOrder(null);
+    } else {
+      await supabase.from('orders').update({ total_amount: newTotal }).eq('id', order.id);
+      setEditingOrder({
+        ...order,
+        total_amount: newTotal,
+        order_items: order.order_items?.filter(i => i.item_id !== itemToRemove.item_id)
+      });
+    }
+
+    fetchData();
+    setIsUploading(false);
+  };
+
   const handleStockChange = async (variantId: string, currentStock: number, increment: number) => {
     const newStock = Math.max(0, currentStock + increment);
     if (newStock === currentStock) return;
@@ -366,6 +427,27 @@ export default function AdminPage() {
       }))
     );
     await supabase.from('product_variants').update({ stock: newStock }).eq('id', variantId);
+  };
+
+  // NUEVA FUNCIÓN: Editar el stock mínimo de una talla específica
+  const handleEditVariantAlert = async (variantId: string, currentAlert: number, sizeName: string) => {
+    const input = window.prompt(
+      `¿A partir de cuántas unidades quieres que el sistema te avise de que falta la talla "${sizeName}"?\n(Si no quieres aviso, pon 0)`,
+      String(currentAlert)
+    );
+    if (input === null || input.trim() === '') return;
+    const parsed = parseInt(input, 10);
+    if (isNaN(parsed) || parsed < 0) return;
+
+    setProducts((prev) =>
+      prev.map((p) => ({
+        ...p,
+        product_variants: p.product_variants.map((v) =>
+          v.id === variantId ? { ...v, min_stock_alert: parsed } : v
+        )
+      }))
+    );
+    await supabase.from('product_variants').update({ min_stock_alert: parsed }).eq('id', variantId);
   };
 
   const handleDeleteVariant = async (variantId: string, productId: string, sizeName: string) => {
@@ -418,7 +500,7 @@ export default function AdminPage() {
             category: newProduct.category,
             description: newProduct.description,
             image_url: finalImageUrl,
-            min_stock_alert: minStockToSave
+            min_stock_alert: minStockToSave // Guarda en el padre como "por defecto"
           }
         ])
         .select('id')
@@ -435,19 +517,20 @@ export default function AdminPage() {
         .from('products')
         .update({ min_stock_alert: minStockToSave })
         .eq('id', productIdToUse);
-      // Sincronizamos el precio con el resto de tallas del mismo producto por si lo ha cambiado
       await supabase
         .from('product_variants')
         .update({ price: priceToSave })
         .eq('product_id', productIdToUse);
     }
 
+    // Guarda el aviso de stock específicamente en la variante también
     const { error: varErr } = await supabase.from('product_variants').insert([
       {
         product_id: productIdToUse,
         size: newProduct.size,
         price: priceToSave,
-        stock: stockToSave
+        stock: stockToSave,
+        min_stock_alert: minStockToSave
       }
     ]);
 
@@ -497,7 +580,6 @@ export default function AdminPage() {
     const minStockToSave = Number.isNaN(editingItem.min_stock_alert) ? 5 : editingItem.min_stock_alert;
     const priceToSave = Number.isNaN(editingItem.price) ? 0 : editingItem.price;
 
-    // 1. Actualizamos los datos generales del producto
     await supabase
       .from('products')
       .update({
@@ -509,13 +591,11 @@ export default function AdminPage() {
       })
       .eq('id', editingItem.productId);
 
-    // 2. Actualizamos el precio en TODAS las tallas de ese producto para que siempre valgan lo mismo
     await supabase
       .from('product_variants')
       .update({ price: priceToSave })
       .eq('product_id', editingItem.productId);
 
-    // 3. Si se editó el nombre de una talla concreta, lo guardamos
     if (editingItem.variantId) {
       await supabase
         .from('product_variants')
@@ -627,8 +707,19 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
+    <div className="min-h-screen bg-slate-50 text-slate-900 relative">
       <div className="w-full h-1.5 bg-gradient-to-r from-green-600 via-purple-600 to-slate-300"></div>
+
+      {/* BOTÓN FLOTANTE TOP VENTAS */}
+      {activeTab === 'inventory' && topSellers.length > 0 && (
+        <button
+          onClick={() => document.getElementById('top-ventas')?.scrollIntoView({ behavior: 'smooth' })}
+          className="fixed bottom-6 right-6 w-14 h-14 bg-slate-900 hover:bg-purple-700 text-white rounded-full shadow-[0_0_20px_rgba(0,0,0,0.2)] flex items-center justify-center transition-all hover:scale-110 z-50 text-xl border-2 border-white/20"
+          title="Ir a Top Ventas"
+        >
+          📉
+        </button>
+      )}
 
       <div className="max-w-[1400px] mx-auto p-6 md:p-8">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200/70">
@@ -687,7 +778,7 @@ export default function AdminPage() {
           </button>
         </div>
 
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200/70 overflow-hidden">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200/70 overflow-hidden mb-12">
           {loading && !isUploading ? (
             <div className="p-16 text-center text-slate-400 font-semibold text-sm">
               Cargando información del sistema...
@@ -886,11 +977,18 @@ export default function AdminPage() {
                                     <option value="Entregado">✅ Entregado</option>
                                   </select>
                                 </td>
-                                <td className="p-4 text-center w-10 align-top pt-5">
+                                <td className="p-4 text-center w-16 align-top pt-5 whitespace-nowrap">
+                                  <button
+                                    onClick={() => setEditingOrder(order)}
+                                    className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-blue-600 transition-all text-sm mr-2"
+                                    title="Editar artículos del pedido"
+                                  >
+                                    ✏️
+                                  </button>
                                   <button
                                     onClick={() => handleDeleteOrders([order.id])}
                                     className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-600 transition-all text-sm"
-                                    title="Eliminar pedido"
+                                    title="Eliminar pedido completo"
                                   >
                                     🗑️
                                   </button>
@@ -906,8 +1004,8 @@ export default function AdminPage() {
               )}
 
               {activeTab === 'inventory' && (
-                <div>
-                  <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row justify-between items-center gap-4">
+                <div className="p-5">
+                  <div className="border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row justify-between items-center gap-4 mb-4 pb-4">
                     <div className="relative w-full sm:w-72">
                       <span className="absolute left-3 top-2.5 text-slate-400 text-xs">🔍</span>
                       <input
@@ -929,7 +1027,7 @@ export default function AdminPage() {
                   {showAddForm && (
                     <form
                       onSubmit={handleAddNewProduct}
-                      className="p-6 bg-slate-50 border-b border-slate-200 flex flex-col gap-4"
+                      className="p-6 bg-slate-50 border border-slate-200 flex flex-col gap-4 rounded-2xl mb-6"
                     >
                       <div className="relative">
                         <label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">
@@ -1147,9 +1245,8 @@ export default function AdminPage() {
                     </form>
                   )}
 
-                  {/* NUEVA TABLA AGRUPADA POR PRODUCTO */}
                   <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
+                    <table className="w-full text-left text-xs border-t border-slate-100">
                       <thead className="bg-slate-50 text-slate-400 uppercase tracking-wider border-b border-slate-100">
                         <tr>
                           <th className="p-4 font-bold">Producto</th>
@@ -1160,7 +1257,6 @@ export default function AdminPage() {
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {filteredProducts.map((product) => {
-                          const minAlert = product.min_stock_alert || 5;
                           const productPrice = product.product_variants[0]?.price || 0;
 
                           return (
@@ -1168,7 +1264,6 @@ export default function AdminPage() {
                               key={product.id}
                               className="hover:bg-slate-50/40 transition-colors align-top"
                             >
-                              {/* 1. PRODUCTO + BOTÓN EDITAR GENERAL */}
                               <td className="p-4 font-bold text-slate-900">
                                 <div className="flex items-center gap-3">
                                   {product.image_url ? (
@@ -1207,23 +1302,19 @@ export default function AdminPage() {
                                   </div>
                                 </div>
                               </td>
-
-                              {/* 2. CATEGORÍA */}
                               <td className="p-4 pt-5">
                                 <span className="bg-purple-50 text-purple-700 font-semibold px-2.5 py-1 rounded-md">
                                   {product.category}
                                 </span>
                               </td>
-
-                              {/* 3. PRECIO ÚNICO */}
                               <td className="p-4 pt-5 font-black text-right text-slate-800 text-sm whitespace-nowrap">
                                 {productPrice.toFixed(2)} €
                               </td>
-
-                              {/* 4. LISTA COMPACTA DE TALLAS */}
                               <td className="p-4">
                                 <div className="flex flex-col gap-2">
                                   {product.product_variants.map((variant) => {
+                                    // Comprueba si la variante tiene un aviso personalizado, sino usa el del producto general
+                                    const minAlert = variant.min_stock_alert ?? product.min_stock_alert ?? 5;
                                     const isLowStock = variant.stock <= minAlert;
 
                                     return (
@@ -1231,11 +1322,23 @@ export default function AdminPage() {
                                         key={variant.id}
                                         className="flex items-center justify-between gap-4 bg-white border border-slate-200/80 px-3 py-2 rounded-xl shadow-2xs hover:border-purple-200 transition-colors"
                                       >
-                                        {/* Etiqueta de Talla */}
                                         <div className="flex items-center gap-2">
                                           <span className="bg-slate-100 text-slate-800 font-black px-2.5 py-1 rounded-lg min-w-[48px] text-center text-xs">
                                             {variant.size}
                                           </span>
+                                          
+                                          {/* NUEVO BOTONCITO PARA CAMBIAR EL MÍNIMO DE ESTA TALLA */}
+                                          <div className="flex items-center bg-slate-50 border border-slate-200 rounded-md px-2 py-0.5 text-[10px] text-slate-500">
+                                            Mínimo: {minAlert}
+                                            <button 
+                                              onClick={() => handleEditVariantAlert(variant.id, minAlert, variant.size)} 
+                                              className="ml-1.5 hover:text-purple-600 transition-colors"
+                                              title="Cambiar stock mínimo para esta talla"
+                                            >
+                                              ✏️
+                                            </button>
+                                          </div>
+
                                           {isLowStock && (
                                             <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded-full">
                                               ⚠️ Stock bajo
@@ -1243,7 +1346,6 @@ export default function AdminPage() {
                                           )}
                                         </div>
 
-                                        {/* Controles de Stock y Borrado de Talla */}
                                         <div className="flex items-center gap-1.5">
                                           <button
                                             onClick={() =>
@@ -1314,6 +1416,30 @@ export default function AdminPage() {
                       </tbody>
                     </table>
                   </div>
+
+                  {/* NUEVO WIDGET TOP VENTAS MOVIDO ABAJO DEL TODO */}
+                  <div id="top-ventas" className="mt-12">
+                    {topSellers.length > 0 && (
+                      <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-100 p-6 rounded-2xl shadow-sm flex flex-col sm:flex-row items-start gap-4">
+                        <div className="w-12 h-12 bg-white rounded-full flex items-center justify-center text-2xl shadow-xs shrink-0">
+                          📈
+                        </div>
+                        <div className="w-full">
+                          <p className="text-sm font-bold text-purple-800 uppercase tracking-wider mb-3">Artículos más demandados (Top Ventas por talla)</p>
+                          <div className="flex flex-wrap gap-2.5">
+                            {topSellers.map(([name, qty], idx) => (
+                              <span key={name} className="bg-white border border-purple-200 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-2 shadow-xs">
+                                <span className="text-slate-400">#{idx + 1}</span> {name} 
+                                <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded-lg text-[11px] ml-1">{qty} uds</span>
+                              </span>
+                            ))}
+                          </div>
+                          <p className="text-xs text-purple-600 mt-3 font-medium">Usa este ranking real de ventas para saber a qué tallas específicas tienes que subirles el aviso de "Stock Mínimo" pulsando en el lápiz ✏️ de arriba.</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                 </div>
               )}
             </>
@@ -1395,7 +1521,7 @@ export default function AdminPage() {
               <div className="flex gap-4">
                 <div className="w-1/2">
                   <label className="block font-bold text-slate-700 mb-1 uppercase tracking-wider">
-                    Avisar si stock baja de:
+                    Stock Mín. General
                   </label>
                   <input
                     type="number"
@@ -1451,6 +1577,56 @@ export default function AdminPage() {
           </div>
         </div>
       )}
+
+      {editingOrder && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-100">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <h3 className="font-bold text-slate-900 text-base">🛒 Editar Pedido</h3>
+              <button
+                onClick={() => setEditingOrder(null)}
+                className="w-8 h-8 rounded-full bg-slate-200/60 hover:bg-slate-200 text-slate-600 font-bold flex items-center justify-center transition-colors"
+              >
+                &times;
+              </button>
+            </div>
+            <div className="p-6">
+              <div className="mb-4">
+                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Comprador</p>
+                <p className="font-black text-slate-900 text-base">{editingOrder.buyer_name} <span className="text-slate-500 font-medium ml-1 text-sm">({editingOrder.scout_unit || 'General'})</span></p>
+              </div>
+              
+              <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-2">Artículos en este pedido</p>
+              <div className="space-y-2 mb-6 max-h-60 overflow-y-auto pr-2">
+                {editingOrder.order_items?.map((item) => (
+                  <div key={item.item_id} className="flex items-center justify-between bg-slate-50 border border-slate-200/60 px-3 py-2.5 rounded-xl">
+                    <div className="text-xs font-medium text-slate-700">
+                      <span className="font-black text-purple-700 mr-1.5">{item.quantity}x</span> 
+                      {item.product_name} <span className="text-slate-400 font-bold ml-1">(Talla: {item.size})</span>
+                    </div>
+                    <button 
+                      onClick={() => handleRemoveItemFromOrder(editingOrder, item)}
+                      disabled={isUploading}
+                      className="text-[10px] bg-red-50 text-red-600 hover:bg-red-100 px-2.5 py-1.5 rounded-lg font-bold transition-colors ml-3 shrink-0"
+                    >
+                      Quitar
+                    </button>
+                  </div>
+                ))}
+                {(!editingOrder.order_items || editingOrder.order_items.length === 0) && (
+                  <p className="text-xs text-slate-400 italic">No hay artículos.</p>
+                )}
+              </div>
+
+              <div className="flex justify-between items-center border-t border-slate-100 pt-4 mt-2">
+                <span className="text-sm font-bold text-slate-600 uppercase tracking-wide">Total a pagar:</span>
+                <span className="text-xl font-black text-emerald-600">{editingOrder.total_amount.toFixed(2)} €</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
