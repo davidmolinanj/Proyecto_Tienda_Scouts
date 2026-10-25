@@ -1,83 +1,121 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '../../../lib/supabase'; // Ajusta los ../ si te da error de ruta
+import { supabase } from '../../../lib/supabase';
+import nodemailer from 'nodemailer';
+
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    // 1. MANTENER SUPABASE DESPIERTO
-    await supabase.from('configuracion').select('id').limit(1);
+    const now = new Date();
+    // Calculamos qué hora será dentro de 24 horas exactas
+    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-    // 2. CALCULAR FECHA LÍMITE (hace 15 días)
-    const fechaLimite = new Date();
-    fechaLimite.setDate(fechaLimite.getDate() - 15); 
-    const fechaISO = fechaLimite.toISOString();
+    const nowISO = now.toISOString();
+    const tomorrowISO = tomorrow.toISOString();
 
-    // 3. BUSCAR PEDIDOS CADUCADOS ANTES DE BORRARLOS
-    const { data: pedidosCaducados, error: selectError } = await supabase
+    // ==========================================
+    // 1. TAREA DE RECORDATORIOS (Caducan en 1 día)
+    // ==========================================
+    const { data: ordersToRemind, error: errRemind } = await supabase
+      .from('orders')
+      .select('id, buyer_name, email, total_amount')
+      .in('status', ['Pendiente', 'Reservado'])
+      .eq('aviso_enviado', false)
+      .lte('expires_at', tomorrowISO) // Caduca antes de 24h
+      .gt('expires_at', nowISO)       // Pero todavía no ha caducado
+      .not('email', 'is', null);      // Y tiene correo anotado
+
+    if (errRemind) {
+      console.error('Error buscando pedidos para avisar:', errRemind);
+    }
+
+    if (ordersToRemind && ordersToRemind.length > 0) {
+      // Configuramos el enviador de correos con tu Gmail
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+      });
+
+      for (const order of ordersToRemind) {
+        if (!order.email || order.email.trim() === '') continue;
+
+        // Enviamos el correo electrónico de recordatorio
+        await transporter.sendMail({
+          from: `"Tienda Grupo Scout" <${process.env.EMAIL_USER}>`,
+          to: order.email,
+          subject: '⚠️ Tu reserva de material caduca mañana',
+          html: `
+            <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 12px; padding: 25px;">
+              <h2 style="color: #6b21a8; margin-top: 0;">¡Hola ${order.buyer_name}!</h2>
+              <p>Te escribimos desde la tienda del Grupo Scout para recordarte que tu reserva de material por valor de <strong>${Number(order.total_amount).toFixed(2)} €</strong> <b>caduca mañana</b>.</p>
+              <p>Por favor, realiza el pago lo antes posible para que podamos confirmarla. Si el plazo expira, la reserva se cancelará automáticamente y los artículos volverán a estar disponibles para el resto de familias.</p>
+              <p>Si ya has realizado el pago y estamos pendientes de validarlo, puedes ignorar este mensaje.</p>
+              <br/>
+              <p>¡Un saludo y Buena Caza! ⚜️</p>
+            </div>
+          `,
+        });
+
+        // Marcamos en la base de datos que ya le hemos enviado el correo
+        await supabase.from('orders').update({ aviso_enviado: true }).eq('id', order.id);
+      }
+    }
+
+    // ==========================================
+    // 2. TAREA DE LIMPIEZA (Ya han caducado)
+    // ==========================================
+    const { data: expiredOrders } = await supabase
       .from('orders')
       .select('id')
-      .eq('status', 'Pendiente')
-      .lt('created_at', fechaISO);
+      .in('status', ['Pendiente', 'Reservado'])
+      .lt('expires_at', nowISO);
 
-    if (selectError) throw selectError;
+    if (expiredOrders && expiredOrders.length > 0) {
+      const expiredIds = expiredOrders.map((o) => o.id);
 
-    // Si hay pedidos caducados, procedemos a devolver el stock y borrarlos
-    if (pedidosCaducados && pedidosCaducados.length > 0) {
-      const idsPedidos = pedidosCaducados.map(p => p.id);
-
-      // Obtenemos todos los artículos de esos pedidos caducados
-      const { data: articulos, error: itemsError } = await supabase
+      // Buscamos los artículos de esos pedidos caducados
+      const { data: expiredItems } = await supabase
         .from('order_items')
         .select('variant_id, quantity')
-        .in('order_id', idsPedidos); // Busca los items que pertenezcan a estos pedidos
+        .in('order_id', expiredIds);
 
-      if (!itemsError && articulos && articulos.length > 0) {
-        // Agrupamos cuántas unidades hay que devolver de cada variante
-        const devoluciones = articulos.reduce((acumulador: any, item: any) => {
-          const vId = item.variant_id;
-          if (!acumulador[vId]) acumulador[vId] = 0;
-          acumulador[vId] += (item.quantity || 1);
-          return acumulador;
-        }, {});
-
-        // Devolvemos el stock variante por variante
-        for (const [variantId, cantidadADevolver] of Object.entries(devoluciones)) {
-          // Consultamos el stock actual de esa variante
-          const { data: varianteData } = await supabase
+      // Devolvemos el stock al inventario
+      if (expiredItems && expiredItems.length > 0) {
+        for (const item of expiredItems) {
+          if (!item.variant_id) continue;
+          const { data: vData } = await supabase
             .from('product_variants')
             .select('stock')
-            .eq('id', variantId)
+            .eq('id', item.variant_id)
             .single();
-            
-          if (varianteData) {
-            // Le sumamos lo que acabamos de rescatar del pedido caducado
+
+          if (vData) {
             await supabase
               .from('product_variants')
-              .update({ stock: varianteData.stock + (cantidadADevolver as number) })
-              .eq('id', variantId);
+              .update({ stock: vData.stock + item.quantity })
+              .eq('id', item.variant_id);
           }
         }
       }
 
-      // 4. AHORA SÍ, BORRAMOS LOS PEDIDOS (ya hemos rescatado el stock)
-      const { error: deleteError } = await supabase
-        .from('orders')
-        .delete()
-        .in('id', idsPedidos);
-
-      if (deleteError) throw deleteError;
+      // Borramos los pedidos caducados
+      await supabase.from('orders').delete().in('id', expiredIds);
     }
 
-    return NextResponse.json({ 
+    return NextResponse.json({
       success: true,
-      message: '¡Mantenimiento completado! Supabase despertado y stock de pedidos caducados devuelto correctamente. 🧹📦', 
-      timestamp: new Date().toISOString() 
-    }, { status: 200 });
-
+      message: 'Rutina de limpieza y avisos ejecutada con éxito',
+      avisos_procesados: ordersToRemind?.length || 0,
+      timestamp: new Date().toISOString(),
+    });
   } catch (error: any) {
-    return NextResponse.json({ 
-      success: false,
-      message: 'Error al ejecutar las tareas de mantenimiento',
-      detalles_del_error: error?.message || "Error desconocido."
-    }, { status: 500 });
+    console.error('Error en el cron:', error);
+    return NextResponse.json(
+      { success: false, error: 'Fallo al ejecutar el robot', detalles: error?.message },
+      { status: 500 }
+    );
   }
 }
